@@ -27,10 +27,8 @@ use std::path::PathBuf;
 use crate::s3::is_s3;
 use glob::glob;
 use flate2::read::MultiGzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use zstd::stream::read::Decoder as ZstdDecoder;
-use std::io::{BufReader, Cursor, Write, BufRead, Read};
+use std::io::{BufReader, Cursor, Write, Read};
 
 
 
@@ -46,7 +44,6 @@ const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst"
 pub(crate) fn expand_dirs(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
     // For local directories -> does a glob over each directory to get all files with given extension
     // For s3 directories -> does an aws s3 ls to search for files
-
     let mut files: Vec<PathBuf> = Vec::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     for path in paths {
@@ -62,7 +59,7 @@ pub(crate) fn expand_dirs(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
                 .to_str()
                 .ok_or_else(|| anyhow!("invalid path '{}'", path.to_string_lossy()))?;
         	for ext in VALID_EXTS {
-        		let pattern = format!("{}*{}", path_str, ext);
+        		let pattern = format!("{}/**/*{}", path_str, ext);
         		for entry in glob(&pattern).expect("Failed to read glob pattern") {
         			if let Ok(path) = entry {
         				files.push(path)
@@ -73,7 +70,6 @@ pub(crate) fn expand_dirs(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
             files.push(path.clone());
         }
     }
-
     Ok(files)
 }
 
@@ -115,7 +111,7 @@ fn read_local_file_into_memory(input_file: &PathBuf) ->Result<Cursor<Vec<u8>>, E
     if ext == "gz" {
         // Gzip case        
         let mut decoder = MultiGzDecoder::new(file);
-        println!("WHAT????");
+        decoder.read_to_end(&mut contents).expect("Failed to read local gz file");
     } else if ext == "zstd" || ext == "zst" {
         // Zstd case
         let mut decoder = ZstdDecoder::new(file).unwrap();
@@ -140,10 +136,8 @@ pub(crate) fn get_output_filename(inputs: &[PathBuf], input_filename: &PathBuf, 
         .iter()
         .find(|pfx| input_filename.starts_with(pfx))
         .expect("No matching prefix found?!?");
-
     let relative_path = input_filename.strip_prefix(matching_prefix).unwrap();
     output_directory.clone().join(relative_path)
-
 }
 
 

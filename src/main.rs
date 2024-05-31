@@ -15,9 +15,10 @@ use dashmap::DashMap;
 use rayon::prelude::*;
 use clap::{Parser};
 use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_output_filename};
-
-
-
+use indicatif::{ProgressBar, ProgressStyle};
+use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::mem;
 pub mod s3;
 pub mod io;
 
@@ -94,7 +95,19 @@ struct Args {
 
 }
 
+/*=================================================================
+=                             UTILITIES                           =
+=================================================================*/
 
+
+fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
+    let mut template = String::from(units);
+    template.push_str(" {human_pos}/{human_len} [{elapsed_precise}/{duration_precise}] [{wide_bar:.cyan/blue}]");
+    ProgressBar::new(num_items as u64)
+        .with_style(
+            ProgressStyle::with_template(&template).unwrap()
+        )
+}
 
 
 
@@ -107,14 +120,15 @@ Basically just used to map filenames to usizes and vice versa so we only have to
 pass around indices vs whole strings
 */
 struct PathLookup {
-    paths: Vec<PathBuf>,
+    //paths: Vec<PathBuf>,
     indices: DashMap<PathBuf, usize>,
 }
 
 impl PathLookup {
     fn new(paths: Vec<PathBuf>) -> Self {
         let indices = Self::build_indices(&paths);
-        PathLookup { paths, indices }
+        PathLookup {// paths, 
+                    indices }
     }
 
     fn build_indices(paths: &Vec<PathBuf>) -> DashMap<PathBuf, usize> {
@@ -125,6 +139,7 @@ impl PathLookup {
             .collect()
     }
 
+    /*
     fn get_index(&self, path: &PathBuf) -> Option<usize> {
         self.indices.get(path).map(|v| v.value().clone())
     }
@@ -143,6 +158,7 @@ impl PathLookup {
         let deserialized: Vec<PathBuf> = serde_json::from_reader(contents)?;
         Ok(PathLookup::new(deserialized))
     }
+    */
 }
 
 
@@ -162,6 +178,9 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u64>, path_id: usize, band_size
     // Setup things: load data, build tokenizer, etc
 
     let data = read_pathbuf_to_mem(path).unwrap();
+    // let mut buffer = Vec::new();
+    // data.read_to_end(&mut buffer).unwrap();
+    // println!("READ DATA {:?}", buffer);
     let tokenizer = p50k_base().unwrap();
     let num_bands = band_seeds.len();
     let perm_seeds = _expand_band_seeds(&band_seeds, band_size);
@@ -257,7 +276,9 @@ fn _update_hash_vals(mut hash_vals: Array1<u64>, a: &Array1<u64>, b: &Array1<u64
     let mut hasher = DefaultHasher::new();
     ngram.hash(&mut hasher);
     let cur_hash = hasher.finish();
-    let phv = ((a.clone() * cur_hash + b) % MERSENNE_PRIME) & MAX_HASH;
+    let mut phv = a.clone();
+    // next line is: (a * cur_hash + b) % P [wrap on overflow]
+    phv.zip_mut_with(&b, |x, y| *x = ((x.wrapping_mul(cur_hash).wrapping_add(*y)) % MERSENNE_PRIME) & MAX_HASH);
     hash_vals.zip_mut_with(&phv, |x, y| *x = std::cmp::min(*x, *y));
     hash_vals
 
@@ -279,7 +300,8 @@ fn _expand_band_seeds(band_seeds: &Vec<u64>, band_size: usize) -> Vec<u64> {
 
 fn _save_band_signature(global_storage: &GlobalStorage, band_seed: u64, band_signature: (u64, u64), doc_id: (usize, usize)) -> () {
     // TODO: ADD BAND SIGNATURE
-    global_storage.entry(band_seed).or_default().entry(band_signature).or_default().push(doc_id);
+    global_storage.entry(band_seed).or_default()
+                  .entry(band_signature).or_default().push(doc_id);
 }
 
 /*=================================================================
@@ -299,6 +321,8 @@ Note: the strategy here is NOT to build connected components, because there's qu
 */
 
 fn build_lines_to_kill(global_storage: &GlobalStorage) -> DashMap<usize, HashSet<usize>> {
+
+    let pbar = build_pbar(global_storage.len(), "Bands");
     let lines_to_kill: DashMap<usize, HashSet<usize>>  = DashMap::new();
 
     for global_ref in global_storage.iter() {
@@ -309,6 +333,7 @@ fn build_lines_to_kill(global_storage: &GlobalStorage) -> DashMap<usize, HashSet
                 lines_to_kill.entry(path_id).or_default().insert(line_num);
             }
         });
+        pbar.inc(1);
     }
 
     lines_to_kill
@@ -324,41 +349,56 @@ Iterates over all paths seen, and removes the lines that we should from each
 If there are no lines to kill, just copy to output
 */
 fn scrub_all_paths(path_lookup: &PathLookup, lines_to_kill: DashMap<usize, HashSet<usize>>,
-                   inputs: &[PathBuf], output_directory: &PathBuf) -> () {
+                   input_dirs: &Vec<PathBuf>, output_directory: &PathBuf) -> (usize, usize) {
     // Iterate over threads with path lookup
+    let documents_seen = AtomicUsize::new(0);
+    let documents_removed = AtomicUsize::new(0);
+    let pbar = build_pbar(path_lookup.indices.len(), "Paths");
     path_lookup.indices.par_iter().for_each(|entry| {
         let input_filename = entry.key();
         let path_id = entry.value();
-        let output_filename = get_output_filename(inputs, input_filename, output_directory);
+        let output_filename = get_output_filename(input_dirs, input_filename, output_directory);
         let chopped_lines = lines_to_kill.get(path_id).map(|v| v.value().clone());
-        chop_lines(input_filename, &output_filename, chopped_lines).unwrap();
+        let (path_seen, path_removed) = chop_lines(input_filename, &output_filename, chopped_lines).unwrap();
+        documents_seen.fetch_add(path_seen, Ordering::SeqCst);
+        documents_removed.fetch_add(path_removed, Ordering::SeqCst);
+        pbar.inc(1);
     });
+
+    (documents_seen.into_inner(), documents_removed.into_inner())
 }
 
 
-fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: Option<HashSet<usize>>) -> Result<(), Error> {
+fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: Option<HashSet<usize>>) -> Result<(usize, usize), Error> {
     let data = read_pathbuf_to_mem(input_filename).unwrap();
     let chop_lines: HashSet<usize> = if chop_lines == None {
         HashSet::new() 
     } else {
         chop_lines.unwrap()
     };
-
-    let mut output_lines: Vec<String> = Vec::new();
+    let mut lines_seen = 0;
+    let mut lines_removed = 0;
+    let mut output_bytes = Vec::new();
     let mut line_num = 0;
+
     for line in data.lines() {
         let line = line?;
+        lines_seen += 1;
         if !chop_lines.contains(&line_num) {
-            output_lines.push(line);
+            output_bytes.extend(line.as_bytes());
+            output_bytes.push(b'\n');
+        } else {
+            lines_removed += 1;
         }
         line_num += 1;
     }
 
-    if output_lines.len() == 0 {
-        return Ok(())
+    if output_bytes.len() == 0 {
+        return Ok((lines_seen, lines_removed))
     }
-    let output_bytes = output_lines.join("\n").into_bytes();
-    write_mem_to_pathbuf(&output_bytes, output_filename)
+    write_mem_to_pathbuf(&output_bytes, output_filename).unwrap();
+    Ok((lines_seen, lines_removed))
+
 }
 
 /*=================================================================
@@ -367,27 +407,52 @@ fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: O
 
 fn main() {
     // TODO: Add args
+    println!("Starting MinHash run...");    
+    let start_main = Instant::now();
     let args = Args::parse();
     // Phase 0: Setup, collect filenames, build path lookup, build band seeds
-    let input_files = expand_dirs(args.input).unwrap();
+    let input_files = expand_dirs(args.input.clone()).unwrap();
+    println!("Collected {:?} input files", input_files.len());
     let path_lookup = PathLookup::new(input_files.clone());
     let band_seeds: Vec<u64> = (0..args.num_bands).map(|i| i as u64).collect();
 
     // Phase 1: Collect hashes for everything
+    println!("Starting hash collection...");
+    let start_hashing = Instant::now();
     let global_storage: GlobalStorage = DashMap::new();
+    let hash_pbar = build_pbar(input_files.len(), "Paths");
     path_lookup.indices.par_iter().for_each(|entry| {
         let input_filename = entry.key();
         let path_id = entry.value();
         process_path(input_filename, &band_seeds, *path_id, args.band_size, args.ngram_size, &global_storage).unwrap();
+        hash_pbar.inc(1) // Claude promises me this is threadsafe
     });
+    let global_storage_size = mem::size_of::<GlobalStorage>();
+    println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
+
 
     // Phase 2: Build Build lines to kill 
+    println!("Collecting which documents to remove...");
+    let start_line_to_kill = Instant::now();
     let lines_to_kill = build_lines_to_kill(&global_storage);
+    println!("...collected which lines to kill in {:?} seconds", start_line_to_kill.elapsed().as_secs());
 
 
     // Phase 3: Chop all the lines
-    scrub_all_paths(&path_lookup, lines_to_kill, &input_files, &args.output);
+    println!("Removing duplicates from pool...");
+    let start_scrub = Instant::now();
+    let (documents_seen, documents_removed) = scrub_all_paths(&path_lookup, lines_to_kill, &args.input, &args.output);
+    println!("... removed duplicates in {:?} seconds", start_scrub.elapsed().as_secs());
 
+
+    // Final report
+    println!("-------------------------");
+    println!("Completing minhash run");
+    println!("Total runtime: {:?}", start_main.elapsed().as_secs());
+    println!("Global storage size {:?}", global_storage_size);
+    println!("Saw {:?} documents", documents_seen);
+    println!("Removed {:?} documents", documents_removed);
+    println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
 }
 
 
