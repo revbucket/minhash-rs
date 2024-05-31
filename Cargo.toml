@@ -35,3 +35,5 @@ sha2 = "0.9"
 bytemuck = "1.16.0"
 dashmap = {version = "5.5.3", features=["rayon"]}
 rayon = "1.10.0"
+heapsize = "0.4.2"
+human_bytes = "0.4.3"

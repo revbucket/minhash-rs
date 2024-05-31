@@ -18,7 +18,9 @@ use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_outp
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::mem;
+use human_bytes::human_bytes;
+
+
 pub mod s3;
 pub mod io;
 
@@ -109,6 +111,28 @@ fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
         )
 }
 
+
+fn est_storage_size_in_bytes(global_storage: &GlobalStorage) -> usize {
+    // Quick'n'dirty way to estimate how much RAM we need for the hash object 
+    // Calculate like: 
+    // |Outer dashmap keys| * 8
+    // For each inner dashmap:
+    //    + |Inner dashmap keys| * 16
+    //    + |total_vals| * 16
+
+    let usize_size = std::mem::size_of::<usize>();
+    let size = AtomicUsize::new(0);
+    size.fetch_add(global_storage.len() * 8, Ordering::SeqCst); // Keys
+
+    for global_ref in global_storage.iter() {
+        size.fetch_add(global_ref.value().len() * 16, Ordering::SeqCst); // 16 for each key in inner
+        global_ref.value().par_iter().for_each(|entry| {
+            size.fetch_add(entry.value().len() * usize_size, Ordering::SeqCst);
+        });
+    }
+
+    size.into_inner()
+}
 
 
 /*=================================================================
@@ -406,7 +430,6 @@ fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: O
 =================================================================*/
 
 fn main() {
-    // TODO: Add args
     println!("Starting MinHash run...");    
     let start_main = Instant::now();
     let args = Args::parse();
@@ -427,7 +450,7 @@ fn main() {
         process_path(input_filename, &band_seeds, *path_id, args.band_size, args.ngram_size, &global_storage).unwrap();
         hash_pbar.inc(1) // Claude promises me this is threadsafe
     });
-    let global_storage_size = mem::size_of::<GlobalStorage>();
+    let global_storage_size = est_storage_size_in_bytes(&global_storage);
     println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
 
 
@@ -448,8 +471,8 @@ fn main() {
     // Final report
     println!("-------------------------");
     println!("Completing minhash run");
-    println!("Total runtime: {:?}", start_main.elapsed().as_secs());
-    println!("Global storage size {:?}", global_storage_size);
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    println!("Global storage size {}", human_bytes(global_storage_size as f64));
     println!("Saw {:?} documents", documents_seen);
     println!("Removed {:?} documents", documents_removed);
     println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
