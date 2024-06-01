@@ -17,8 +17,6 @@ We will ONLY ever be concerned about files that have extensions of:
 Compression schemes will always be inferred from extension
 */
 
-
-
 use std::fs::File;
 use crate::s3::{get_reader_from_s3, expand_s3_dir, write_cursor_to_s3};
 use anyhow::Error;
@@ -29,8 +27,9 @@ use glob::glob;
 use flate2::read::MultiGzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
 use std::io::{BufReader, Cursor, Write, Read};
-
-
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use zstd::stream::write::Encoder as ZstdEncoder;
 
 const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst"];
 
@@ -142,8 +141,9 @@ pub(crate) fn get_output_filename(inputs: &[PathBuf], input_filename: &PathBuf, 
 
 
 pub(crate) fn write_mem_to_pathbuf(contents: &[u8], output_file: &PathBuf) -> Result<(), Error> {
+	let compressed_data = compress_data(contents.to_vec(), output_file);
     if is_s3(output_file) {
-        let cursor = Cursor::new(contents.to_vec());
+        let cursor = Cursor::new(compressed_data);
         let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -157,10 +157,33 @@ pub(crate) fn write_mem_to_pathbuf(contents: &[u8], output_file: &PathBuf) -> Re
         };
     } else {
         let mut file = File::create(output_file).expect(format!("Unable to create output file {:?}", output_file).as_str());
-        file.write_all(contents).expect(format!("Unable to write to {:?}", output_file).as_str());
+        file.write_all(&compressed_data).expect(format!("Unable to write to {:?}", output_file).as_str());
 
     }
     Ok(())
+}
+
+
+
+fn compress_data(data: Vec<u8>, filename: &PathBuf) -> Vec<u8> {
+    // Given a filename with an extension, compresses a bytestream accordingly 
+    // {zst, zstd} -> zstandard, {gz} -> gzip, anything else -> nothing
+
+
+    let output_data = match filename.extension().unwrap().to_str() {
+        Some("gz") => {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&data).unwrap();            
+            encoder.finish().unwrap()
+        },
+        Some("zstd") | Some("zst") => {
+            let mut encoder = ZstdEncoder::new(Vec::new(), 0).unwrap();
+            encoder.write_all(&data).unwrap();            
+            encoder.finish().unwrap()
+        },
+        _ => {data}
+    };
+    output_data
 }
 
 
