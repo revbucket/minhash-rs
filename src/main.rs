@@ -1,7 +1,8 @@
-use std::collections::{VecDeque, HashSet};
+
+use std::collections::{VecDeque, HashSet, HashMap};
 use std::hash::{Hash, Hasher, DefaultHasher};
 use anyhow::{Result, Error};
-use std::path::{PathBuf};
+use std::path::{PathBuf, Path};
 use std::io::{BufRead};
 use rand::prelude::*;
 use tiktoken_rs::{p50k_base, CoreBPE};
@@ -15,22 +16,26 @@ use dashmap::DashMap;
 use rayon::prelude::*;
 use clap::{Parser};
 use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_output_filename};
+use crate::storage::{to_byte_size, compute_sig_size, BandStorage, BandStorageConfig, IntValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use human_bytes::human_bytes;
 
 
+
+
 pub mod s3;
 pub mod io;
-
+pub mod storage;
 
 
 
 const MERSENNE_PRIME: u64 = (1 << 61) - 1;
 const MAX_HASH: u64 = (1 << 32) - 1;
-type GlobalStorage = DashMap<u64, DashMap<(u64, u64), Vec<(usize, usize)>>>;
 
+
+//                           band.         signature       pathID LineNum
 /*
 General design notes for minhash in rust:
 Barebones/not too many features
@@ -95,6 +100,12 @@ struct Args {
     #[arg(long, default_value_t=5)]
     ngram_size: usize,   
 
+    #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
+    num_docs: usize,
+
+    #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
+    max_lines_per_path: usize
+
 }
 
 /*=================================================================
@@ -112,27 +123,30 @@ fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
 }
 
 
-fn est_storage_size_in_bytes(global_storage: &GlobalStorage) -> usize {
+fn est_storage_size_in_bytes(band_storage: &BandStorage) -> usize {
     // Quick'n'dirty way to estimate how much RAM we need for the hash object 
     // Calculate like: 
     // |Outer dashmap keys| * 8
     // For each inner dashmap:
     //    + |Inner dashmap keys| * 16
     //    + |total_vals| * 16
-
+    panic!("NOT IMPLEMENTED");
     let usize_size = std::mem::size_of::<usize>();
     let size = AtomicUsize::new(0);
-    size.fetch_add(global_storage.len() * 8, Ordering::SeqCst); // Keys
+    size.fetch_add(band_storage.len() * 8, Ordering::SeqCst); // Keys
 
-    for global_ref in global_storage.iter() {
-        size.fetch_add(global_ref.value().len() * 16, Ordering::SeqCst); // 16 for each key in inner
-        global_ref.value().par_iter().for_each(|entry| {
+    for band_ref in band_storage.iter() {
+        size.fetch_add(band_ref.value().len() * 16, Ordering::SeqCst); // 16 for each key in inner
+        band_ref.value().par_iter().for_each(|entry| {
             size.fetch_add(entry.value().len() * usize_size, Ordering::SeqCst);
         });
     }
 
     size.into_inner()
 }
+
+
+
 
 
 /*=================================================================
@@ -163,26 +177,25 @@ impl PathLookup {
             .collect()
     }
 
-    /*
-    fn get_index(&self, path: &PathBuf) -> Option<usize> {
-        self.indices.get(path).map(|v| v.value().clone())
-    }
-
-    fn get_string(&self, index: usize) -> Option<&PathBuf> {
-        self.paths.get(index)
+    fn len(&self) -> usize {
+        self.indices.len()
     }
 
     fn save_to_file(&self, file_path: &PathBuf) -> Result<(), Error> {
-        let serialized = serde_json::to_vec(&self.paths)?;
+        let hash_indices: HashMap<_, _> = self.indices.clone().into_par_iter().collect();
+        let serialized = serde_json::to_vec(&hash_indices)?;
         write_mem_to_pathbuf(&serialized, file_path)
     }
 
     fn load_from_file(file_path: &PathBuf) -> Result<Self> {
         let contents = read_pathbuf_to_mem(file_path).unwrap();
-        let deserialized: Vec<PathBuf> = serde_json::from_reader(contents)?;
-        Ok(PathLookup::new(deserialized))
+        let deserialized: HashMap<PathBuf, usize> = serde_json::from_reader(contents)?;
+        let mut pairs: Vec<(PathBuf, usize)> = deserialized.into_iter().collect();
+        pairs.sort_by_key(|&(_, id)| id);
+        let paths = pairs.into_iter().map(|(path, _)| path).collect();
+        Ok(PathLookup::new(paths))
     }
-    */
+
 }
 
 
@@ -198,7 +211,7 @@ Preprocessing flow is to use the slimpajama flow, and then tokenize with tiktoke
 
 
 fn process_path(path: &PathBuf, band_seeds: &Vec<u64>, path_id: usize, band_size: usize, ngram_size: usize,
-                global_storage: &GlobalStorage) -> Result<(), Error> {
+                band_storage: &BandStorage, config: &BandStorageConfig) -> Result<(), Error> {
     // Setup things: load data, build tokenizer, etc
 
     let data = read_pathbuf_to_mem(path).unwrap();
@@ -208,8 +221,9 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u64>, path_id: usize, band_size
     let tokenizer = p50k_base().unwrap();
     let num_bands = band_seeds.len();
     let perm_seeds = _expand_band_seeds(&band_seeds, band_size);
+    let path_id = IntValueEnum::new(path_id, config.path_size);
     for (line_num, line) in data.lines().enumerate() {
-        let doc_id = (path_id, line_num);
+        let doc_id = (path_id.clone(), IntValueEnum::new(line_num, config.line_size));
         let line = line.unwrap();
         let json: Value = serde_json::from_str(&line).unwrap();
         let text = json["text"].as_str().unwrap();
@@ -222,10 +236,14 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u64>, path_id: usize, band_size
             let mut hasher = Sha256::new(); 
             hasher.update(bytemuck::cast_slice(row.as_slice().unwrap()));
             let hash = hasher.finalize();
-            let result0 = u64::from_be_bytes(hash[..8].try_into().unwrap());
-            let result1 = u64::from_be_bytes(hash[8..16].try_into().unwrap());
-            let band_signature = (result0, result1);        
-            _save_band_signature(global_storage, *band_seed, band_signature, doc_id.clone());
+            //println!("CONFIG SIG SIZE {:?} ", config.sig_size);
+            //println!("SIG {:?}", hash[..config.sig_size].to_vec());
+            //let band_signature = IntValueEnum::from_bytes(hash[..config.sig_size].to_vec(), config.sig_size);   
+
+            //println!("GOT BAND SIG");
+
+            let band_signature = IntValueEnum::from_bytes(hash[..config.sig_size].to_vec(), config.sig_size);   
+            _save_band_signature(band_storage, *band_seed, band_signature, doc_id.clone());
         }
     }
     Ok(())
@@ -322,9 +340,9 @@ fn _expand_band_seeds(band_seeds: &Vec<u64>, band_size: usize) -> Vec<u64> {
     perm_seeds
 }
 
-fn _save_band_signature(global_storage: &GlobalStorage, band_seed: u64, band_signature: (u64, u64), doc_id: (usize, usize)) -> () {
+fn _save_band_signature(band_storage: &BandStorage, band_seed: u64, band_signature: IntValueEnum, doc_id: (IntValueEnum, IntValueEnum)) -> () {
     // TODO: ADD BAND SIGNATURE
-    global_storage.entry(band_seed).or_default()
+    band_storage.entry(band_seed).or_default()
                   .entry(band_signature).or_default().push(doc_id);
 }
 
@@ -344,25 +362,61 @@ but iterate over the keys of each {band signature -> [...]} in parallel
 Note: the strategy here is NOT to build connected components, because there's questions about transitivity
 */
 
-fn build_lines_to_kill(global_storage: &GlobalStorage) -> DashMap<usize, HashSet<usize>> {
+fn build_lines_to_kill(band_storage: &BandStorage) -> DashMap<usize, HashSet<usize>> 
+// hashset because I think it's threadsafe if insert only (needs checking?)
+{
 
-    let pbar = build_pbar(global_storage.len(), "Bands");
+    let pbar = build_pbar(band_storage.len(), "Bands");
     let lines_to_kill: DashMap<usize, HashSet<usize>>  = DashMap::new();
 
-    for global_ref in global_storage.iter() {
+    for global_ref in band_storage.iter() {
         global_ref.value().par_iter().for_each(|entry| {
             let value = entry.value();
             for i in 1..value.len() {
-                let (path_id, line_num) = value[i];
-                lines_to_kill.entry(path_id).or_default().insert(line_num);
+                let (path_id, line_num) = &value[i];
+                lines_to_kill
+                    .entry(path_id.as_usize())
+                    .or_default()
+                    .insert(line_num.as_usize());
             }
         });
         pbar.inc(1);
     }
-
     lines_to_kill
 }
 
+
+fn save_lines_to_kill(lines_to_kill: DashMap<usize, HashSet<usize>>, path: &PathBuf) -> Result<(), Error>{
+    // Saves the lines_to_kill object to a path
+    let regular_map : HashMap<_,_> = lines_to_kill.into_par_iter().collect();
+    let bytes = serde_json::to_vec(&regular_map).unwrap();
+    write_mem_to_pathbuf(&bytes, &path).unwrap();
+    Ok(())
+}
+
+fn load_lines_to_kill(path: &PathBuf) -> Result<HashMap<usize, HashSet<usize>>, Error>{
+    let bytes = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
+    let data: HashMap<usize, HashSet<usize>> = serde_json::from_slice(&bytes).unwrap();
+    Ok(data)
+}
+
+fn merge_lines_to_kill(all_lines_to_kill: Vec<HashMap<usize, HashSet<usize>>>) -> Result<DashMap<usize, HashSet<usize>>, Error> {
+    let lines_to_kill: DashMap<usize, HashSet<usize>>  = DashMap::new();
+    let _ = all_lines_to_kill
+        .par_iter()
+        .map(|dash| {
+            dash
+            .par_iter()
+            .for_each(|(path_id, line_set)| {
+                for line_num in line_set {
+                    lines_to_kill.entry(*path_id).or_default()
+                                 .insert(*line_num);
+                }
+            });
+        }
+    );
+    Ok(lines_to_kill)
+}
 
 
 /*=================================================================
@@ -430,41 +484,53 @@ fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: O
 =================================================================*/
 
 fn main() {
+    let args = Args::parse();
+    minhash(args.input, args.output, args.num_bands, args.band_size, args.ngram_size, args.num_docs, args.max_lines_per_path).unwrap();
+}
+
+fn minhash(input: Vec<PathBuf>, output: PathBuf, num_bands: usize, band_size: usize, ngram_size: usize, num_docs: usize, max_lines_per_path: usize) -> Result<(), Error>{
     println!("Starting MinHash run...");    
     let start_main = Instant::now();
-    let args = Args::parse();
     // Phase 0: Setup, collect filenames, build path lookup, build band seeds
-    let input_files = expand_dirs(args.input.clone()).unwrap();
+    let mut input_files = expand_dirs(input.clone()).unwrap();
+    input_files.sort(); // sort before building the path lookup
     println!("Collected {:?} input files", input_files.len());
     let path_lookup = PathLookup::new(input_files.clone());
-    let band_seeds: Vec<u64> = (0..args.num_bands).map(|i| i as u64).collect();
+    let band_seeds: Vec<u64> = (0..num_bands).map(|i| i as u64).collect();
+
+
+    let sig_size = compute_sig_size(num_docs);
+    let path_size = to_byte_size(path_lookup.len());
+    let line_size = to_byte_size(max_lines_per_path);
+    println!("SIZES {:?} {:?} {:?}", sig_size, path_size, line_size);
+    let band_storage_config = BandStorageConfig { sig_size, path_size, line_size };
 
     // Phase 1: Collect hashes for everything
     println!("Starting hash collection...");
     let start_hashing = Instant::now();
-    let global_storage: GlobalStorage = DashMap::new();
+
+    let band_storage = BandStorage::new();
     let hash_pbar = build_pbar(input_files.len(), "Paths");
     path_lookup.indices.par_iter().for_each(|entry| {
         let input_filename = entry.key();
         let path_id = entry.value();
-        process_path(input_filename, &band_seeds, *path_id, args.band_size, args.ngram_size, &global_storage).unwrap();
+        process_path(input_filename, &band_seeds, *path_id, band_size, ngram_size, &band_storage, &band_storage_config).unwrap();
         hash_pbar.inc(1) // Claude promises me this is threadsafe
     });
-    let global_storage_size = est_storage_size_in_bytes(&global_storage);
+    //let band_storage_size = est_storage_size_in_bytes(&band_storage);
     println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
-
 
     // Phase 2: Build Build lines to kill 
     println!("Collecting which documents to remove...");
     let start_line_to_kill = Instant::now();
-    let lines_to_kill = build_lines_to_kill(&global_storage);
+    let lines_to_kill = build_lines_to_kill(&band_storage);
     println!("...collected which lines to kill in {:?} seconds", start_line_to_kill.elapsed().as_secs());
-
+    save_lines_to_kill(lines_to_kill.clone(), &Path::join(&output, "lines_to_kill.gz")).unwrap();
 
     // Phase 3: Chop all the lines
     println!("Removing duplicates from pool...");
     let start_scrub = Instant::now();
-    let (documents_seen, documents_removed) = scrub_all_paths(&path_lookup, lines_to_kill, &args.input, &args.output);
+    let (documents_seen, documents_removed) = scrub_all_paths(&path_lookup, lines_to_kill, &input, &output);
     println!("... removed duplicates in {:?} seconds", start_scrub.elapsed().as_secs());
 
 
@@ -472,10 +538,14 @@ fn main() {
     println!("-------------------------");
     println!("Completing minhash run");
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    println!("Global storage size {}", human_bytes(global_storage_size as f64));
+    //println!("Band storage size {}", human_bytes(band_storage_size as f64));
     println!("Saw {:?} documents", documents_seen);
     println!("Removed {:?} documents", documents_removed);
     println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
+
+    Ok(())
 }
+
+
 
 
