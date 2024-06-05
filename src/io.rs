@@ -40,16 +40,21 @@ const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst"
 
 
 
-pub(crate) fn expand_dirs(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
+pub(crate) fn expand_dirs(paths: Vec<PathBuf>, manual_ext: Option<&[&str]>) -> Result<Vec<PathBuf>, Error> {
     // For local directories -> does a glob over each directory to get all files with given extension
     // For s3 directories -> does an aws s3 ls to search for files
+    let exts = if !manual_ext.is_none() {
+    	manual_ext.unwrap()
+    } else {
+    	VALID_EXTS
+    };
     let mut files: Vec<PathBuf> = Vec::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     for path in paths {
         if is_s3(path.clone()) {
             // Use async_std to block until we scour the s3 directory for files
             runtime.block_on(async {
-                let s3_paths = expand_s3_dir(&path, VALID_EXTS).await.unwrap();
+                let s3_paths = expand_s3_dir(&path, exts).await.unwrap();
                 files.extend(s3_paths);                
             });                
         }
@@ -57,7 +62,7 @@ pub(crate) fn expand_dirs(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
             let path_str = path
                 .to_str()
                 .ok_or_else(|| anyhow!("invalid path '{}'", path.to_string_lossy()))?;
-        	for ext in VALID_EXTS {
+        	for ext in exts {
         		let pattern = format!("{}/**/*{}", path_str, ext);
         		for entry in glob(&pattern).expect("Failed to read glob pattern") {
         			if let Ok(path) = entry {
@@ -168,8 +173,6 @@ pub(crate) fn write_mem_to_pathbuf(contents: &[u8], output_file: &PathBuf) -> Re
 fn compress_data(data: Vec<u8>, filename: &PathBuf) -> Vec<u8> {
     // Given a filename with an extension, compresses a bytestream accordingly 
     // {zst, zstd} -> zstandard, {gz} -> gzip, anything else -> nothing
-
-
     let output_data = match filename.extension().unwrap().to_str() {
         Some("gz") => {
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());

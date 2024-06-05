@@ -12,15 +12,14 @@ use ndarray::{Array1};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Sha256, Digest};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
-use clap::{Parser};
+use clap::{Parser, Subcommand};
 use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_output_filename};
 use crate::storage::{to_byte_size, compute_sig_size, BandStorage, BandStorageConfig, IntValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use human_bytes::human_bytes;
 
 
 
@@ -34,8 +33,6 @@ pub mod storage;
 const MERSENNE_PRIME: u64 = (1 << 61) - 1;
 const MAX_HASH: u64 = (1 << 32) - 1;
 
-
-//                           band.         signature       pathID LineNum
 /*
 General design notes for minhash in rust:
 Barebones/not too many features
@@ -64,8 +61,8 @@ V1: Run the whole shebang just to get the steps right
 
 
 V2: 
-    1. Have command to save step2 outputs somewhere 
-    2. Load all step2 outputs into memory
+    1. Have command to save step3 outputs somewhere 
+    2. Load all step3 outputs into memory
     3. Do step 3,4,5 as above
 
 
@@ -80,31 +77,109 @@ NOTE:
 =                                  ARGS                           =
 =================================================================*/
 
-#[derive(Parser, Debug)]
-struct Args {
-    /// (List of) directories/files (on s3 or local) that are jsonl.gz or jsonl.zstd files
-    #[arg(required=true, long, num_args=1..)]
-    input: Vec<PathBuf>,
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct ArgParser {
+    #[clap(subcommand)]
+    command: Commands,
+}
 
-    /// Output location (may be an s3 uri)
-    #[arg(required=true, long)]
-    output: PathBuf,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    #[clap(arg_required_else_help = true)]
+    MinHash { 
+        /// (List of) directories/files (on s3 or local) that are jsonl.gz or jsonl.zstd files
+        #[arg(required=true, long, num_args=1..)]
+        input: Vec<PathBuf>,
+
+        /// Output location (may be an s3 uri)
+        #[arg(required=true, long)]
+        output: PathBuf,
 
 
-    #[arg(long, default_value_t=13)]
-    num_bands: usize,
+        #[arg(long, default_value_t=13)]
+        num_bands: u64,
 
-    #[arg(long, default_value_t=10)]
-    band_size: usize,    
+        #[arg(long, default_value_t=10)]
+        band_size: usize,    
 
-    #[arg(long, default_value_t=5)]
-    ngram_size: usize,   
+        #[arg(long, default_value_t=5)]
+        ngram_size: usize,   
 
-    #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
-    num_docs: usize,
+        #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
+        num_docs: usize,
 
-    #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
-    max_lines_per_path: usize
+        #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
+        max_lines_per_path: usize
+    }, 
+    PathLookup {
+        // Just makes and saves the path lookup object 
+
+        /// Input locations for paths to hash
+        #[arg(required=true, long, num_args=1..)]
+        input: Vec<PathBuf>,        
+
+        /// Output location (may be an s3 uri)
+        #[arg(required=true, long)]
+        output: PathBuf,
+
+    },
+
+    BandSaver {
+        // Just runs and saves the hashes for a "band group", collects into a lines-to-kill object
+
+        /// Location of the pre-computed path lookup object
+        #[arg(required=true, long)]
+        path_lookup: PathBuf,
+
+        /// Where the lines-to-kill list gets stored 
+        #[arg(required=true, long)]
+        output: PathBuf, 
+
+        /// Give a unique id for this run 
+        #[arg(required=true, long)]
+        band_group_id: usize,
+
+        /// Band start (needed for full determinism. Leaving this unset is probably okay)
+        #[arg(long, default_value_t=0)] // 0 is default
+        band_start: u64,
+
+        #[arg(long, default_value_t=13)]
+        num_bands: u64,
+
+        #[arg(long, default_value_t=10)]
+        band_size: usize,    
+
+        #[arg(long, default_value_t=5)]
+        ngram_size: usize,   
+
+        #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
+        num_docs: usize,
+
+        #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
+        max_lines_per_path: usize        
+    },
+
+    BandLoader {
+        /// Input directories (helpful for naming output files)
+        /// If left empty, this outputs according to the basename for each file
+        #[arg(long)]
+        input: Vec<PathBuf>,
+
+        /// where the lines_to_kill are stored
+        #[arg(required=true, long)]
+        lines_to_kill_dir: PathBuf,
+
+        /// Location of pre-computed path lookup object 
+        #[arg(required=true, long)]
+        path_lookup: PathBuf,
+
+        /// Where the output files go 
+        #[arg(required=true, long)]
+        output: PathBuf,
+
+
+    }
 
 }
 
@@ -116,35 +191,13 @@ struct Args {
 fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
     let mut template = String::from(units);
     template.push_str(" {human_pos}/{human_len} [{elapsed_precise}/{duration_precise}] [{wide_bar:.cyan/blue}]");
-    ProgressBar::new(num_items as u64)
+    let pbar = ProgressBar::new(num_items as u64)
         .with_style(
             ProgressStyle::with_template(&template).unwrap()
-        )
+        );
+    pbar.inc(0);
+    pbar
 }
-
-
-fn est_storage_size_in_bytes(band_storage: &BandStorage) -> usize {
-    // Quick'n'dirty way to estimate how much RAM we need for the hash object 
-    // Calculate like: 
-    // |Outer dashmap keys| * 8
-    // For each inner dashmap:
-    //    + |Inner dashmap keys| * 16
-    //    + |total_vals| * 16
-    panic!("NOT IMPLEMENTED");
-    let usize_size = std::mem::size_of::<usize>();
-    let size = AtomicUsize::new(0);
-    size.fetch_add(band_storage.len() * 8, Ordering::SeqCst); // Keys
-
-    for band_ref in band_storage.iter() {
-        size.fetch_add(band_ref.value().len() * 16, Ordering::SeqCst); // 16 for each key in inner
-        band_ref.value().par_iter().for_each(|entry| {
-            size.fetch_add(entry.value().len() * usize_size, Ordering::SeqCst);
-        });
-    }
-
-    size.into_inner()
-}
-
 
 
 
@@ -342,8 +395,12 @@ fn _expand_band_seeds(band_seeds: &Vec<u64>, band_size: usize) -> Vec<u64> {
 
 fn _save_band_signature(band_storage: &BandStorage, band_seed: u64, band_signature: IntValueEnum, doc_id: (IntValueEnum, IntValueEnum)) -> () {
     // TODO: ADD BAND SIGNATURE
-    band_storage.entry(band_seed).or_default()
-                  .entry(band_signature).or_default().push(doc_id);
+    band_storage
+        .entry(band_seed)
+        .or_insert_with(|| DashMap::new())
+        .entry(band_signature)
+        .or_default()
+        .push(doc_id);
 }
 
 /*=================================================================
@@ -362,12 +419,12 @@ but iterate over the keys of each {band signature -> [...]} in parallel
 Note: the strategy here is NOT to build connected components, because there's questions about transitivity
 */
 
-fn build_lines_to_kill(band_storage: &BandStorage) -> DashMap<usize, HashSet<usize>> 
+fn build_lines_to_kill(band_storage: &BandStorage) -> DashMap<usize, DashSet<usize>> 
 // hashset because I think it's threadsafe if insert only (needs checking?)
 {
 
     let pbar = build_pbar(band_storage.len(), "Bands");
-    let lines_to_kill: DashMap<usize, HashSet<usize>>  = DashMap::new();
+    let lines_to_kill: DashMap<usize, DashSet<usize>>  = DashMap::new();
 
     for global_ref in band_storage.iter() {
         global_ref.value().par_iter().for_each(|entry| {
@@ -386,13 +443,20 @@ fn build_lines_to_kill(band_storage: &BandStorage) -> DashMap<usize, HashSet<usi
 }
 
 
-fn save_lines_to_kill(lines_to_kill: DashMap<usize, HashSet<usize>>, path: &PathBuf) -> Result<(), Error>{
+fn save_lines_to_kill(lines_to_kill: DashMap<usize, DashSet<usize>>, path: &PathBuf) -> Result<(), Error>{
     // Saves the lines_to_kill object to a path
-    let regular_map : HashMap<_,_> = lines_to_kill.into_par_iter().collect();
+    let regular_map : HashMap<usize,HashSet<usize>> = lines_to_kill
+        .into_par_iter()
+        .map(|entry| {
+            let regular_set: HashSet<usize> = entry.1.iter().map(|r| *r).collect();
+            (entry.0, regular_set)
+        })
+        .collect();
     let bytes = serde_json::to_vec(&regular_map).unwrap();
     write_mem_to_pathbuf(&bytes, &path).unwrap();
     Ok(())
 }
+
 
 fn load_lines_to_kill(path: &PathBuf) -> Result<HashMap<usize, HashSet<usize>>, Error>{
     let bytes = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
@@ -400,21 +464,24 @@ fn load_lines_to_kill(path: &PathBuf) -> Result<HashMap<usize, HashSet<usize>>, 
     Ok(data)
 }
 
-fn merge_lines_to_kill(all_lines_to_kill: Vec<HashMap<usize, HashSet<usize>>>) -> Result<DashMap<usize, HashSet<usize>>, Error> {
-    let lines_to_kill: DashMap<usize, HashSet<usize>>  = DashMap::new();
+
+fn merge_lines_to_kill(all_lines_to_kill: Vec<HashMap<usize, HashSet<usize>>>) -> Result<DashMap<usize, DashSet<usize>>, Error> {
+    let lines_to_kill: DashMap<usize, DashSet<usize>>  = DashMap::new();
+    //println!("ALTK {:?}", all_lines_to_kill);
     let _ = all_lines_to_kill
         .par_iter()
-        .map(|dash| {
+        .for_each(|dash| {
             dash
             .par_iter()
             .for_each(|(path_id, line_set)| {
+                let mut entry = lines_to_kill.entry(*path_id).or_default();
                 for line_num in line_set {
-                    lines_to_kill.entry(*path_id).or_default()
-                                 .insert(*line_num);
+                    entry.value_mut().insert(*line_num);
                 }
             });
         }
     );
+    //println!("LTK {:?}", lines_to_kill);
     Ok(lines_to_kill)
 }
 
@@ -426,7 +493,7 @@ fn merge_lines_to_kill(all_lines_to_kill: Vec<HashMap<usize, HashSet<usize>>>) -
 Iterates over all paths seen, and removes the lines that we should from each
 If there are no lines to kill, just copy to output
 */
-fn scrub_all_paths(path_lookup: &PathLookup, lines_to_kill: DashMap<usize, HashSet<usize>>,
+fn scrub_all_paths(path_lookup: &PathLookup, lines_to_kill: DashMap<usize, DashSet<usize>>,
                    input_dirs: &Vec<PathBuf>, output_directory: &PathBuf) -> (usize, usize) {
     // Iterate over threads with path lookup
     let documents_seen = AtomicUsize::new(0);
@@ -447,10 +514,10 @@ fn scrub_all_paths(path_lookup: &PathLookup, lines_to_kill: DashMap<usize, HashS
 }
 
 
-fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: Option<HashSet<usize>>) -> Result<(usize, usize), Error> {
+fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: Option<DashSet<usize>>) -> Result<(usize, usize), Error> {
     let data = read_pathbuf_to_mem(input_filename).unwrap();
-    let chop_lines: HashSet<usize> = if chop_lines == None {
-        HashSet::new() 
+    let chop_lines: DashSet<usize> = if chop_lines.is_none() {
+        DashSet::new() 
     } else {
         chop_lines.unwrap()
     };
@@ -480,19 +547,15 @@ fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: O
 }
 
 /*=================================================================
-=                                 MAIN                            =
+=                             Subcommands                         =
 =================================================================*/
 
-fn main() {
-    let args = Args::parse();
-    minhash(args.input, args.output, args.num_bands, args.band_size, args.ngram_size, args.num_docs, args.max_lines_per_path).unwrap();
-}
 
-fn minhash(input: Vec<PathBuf>, output: PathBuf, num_bands: usize, band_size: usize, ngram_size: usize, num_docs: usize, max_lines_per_path: usize) -> Result<(), Error>{
+fn minhash(input: &Vec<PathBuf>, output: &PathBuf, num_bands: u64, band_size: usize, ngram_size: usize, num_docs: usize, max_lines_per_path: usize) -> Result<(), Error>{
     println!("Starting MinHash run...");    
     let start_main = Instant::now();
     // Phase 0: Setup, collect filenames, build path lookup, build band seeds
-    let mut input_files = expand_dirs(input.clone()).unwrap();
+    let mut input_files = expand_dirs(input.clone(), None).unwrap();
     input_files.sort(); // sort before building the path lookup
     println!("Collected {:?} input files", input_files.len());
     let path_lookup = PathLookup::new(input_files.clone());
@@ -546,6 +609,132 @@ fn minhash(input: Vec<PathBuf>, output: PathBuf, num_bands: usize, band_size: us
     Ok(())
 }
 
+fn build_path_lookup_only(input: &Vec<PathBuf>, output: &PathBuf) -> Result<(), Error> {
+    let mut input_files = expand_dirs(input.clone(), None).unwrap();
+    input_files.sort(); // sort before building the path lookup
+    println!("Collected {:?} input files", input_files.len());
+    let path_lookup = PathLookup::new(input_files.clone());
+    path_lookup.save_to_file(&output)
+    
+}
+
+fn band_saver(path_lookup: &PathBuf, output: &PathBuf, band_group_id: usize, band_start: u64, num_bands: u64, 
+              band_size: usize, ngram_size: usize, num_docs: usize, max_lines_per_path: usize) -> Result<(), Error> {
+    println!("Starting part of MinHash run (band group {:?})...", band_group_id);        
+    let start_main = Instant::now();
+    
+    // Load path lookup and setup things    
+    let path_lookup = PathLookup::load_from_file(path_lookup).unwrap();
+    let band_seeds: Vec<u64> = if band_start == 0 {
+        let mut rng = rand::thread_rng();
+        (0..num_bands).map(|_| rng.gen()).collect()
+    } else {
+        (band_start..band_start+num_bands).collect()
+    };
+    let sig_size = compute_sig_size(num_docs);
+    let path_size = to_byte_size(path_lookup.len());
+    let line_size = to_byte_size(max_lines_per_path);
+    println!("SIZES {:?} {:?} {:?}", sig_size, path_size, line_size);
+    let band_storage_config = BandStorageConfig { sig_size, path_size, line_size };
+
+
+    // Phase 1: Collect hashes for everything
+    println!("Starting hash collection...");
+    let start_hashing = Instant::now();
+
+    let band_storage = BandStorage::new();
+    let hash_pbar = build_pbar(path_lookup.len(), "Paths");
+    path_lookup.indices.par_iter().for_each(|entry| {
+        let input_filename = entry.key();
+        let path_id = entry.value();
+        process_path(input_filename, &band_seeds, *path_id, band_size, ngram_size, &band_storage, &band_storage_config).unwrap();
+        hash_pbar.inc(1) // Claude promises me this is threadsafe
+    });
+    //let band_storage_size = est_storage_size_in_bytes(&band_storage);
+    println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
+
+    // Phase 2: Build Build lines to kill 
+    println!("Collecting which documents to remove...");
+    let start_line_to_kill = Instant::now();
+    let lines_to_kill = build_lines_to_kill(&band_storage);
+    println!("...collected which lines to kill in {:?} seconds", start_line_to_kill.elapsed().as_secs());
+
+    // Phase 3: Save outputs 
+    let output_file = Path::join(output, format!("lines_to_kill_band{:08}.gz", band_group_id));
+    save_lines_to_kill(lines_to_kill.clone(), &output_file).unwrap();
+
+    println!("-------------------------");
+    println!("Completing part of MinHash run (band group {:?})", band_group_id);
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    Ok(())
+}
+
+
+fn band_loader(input: &Vec<PathBuf>, lines_to_kill_dir: &PathBuf, path_lookup: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+    println!("Finishing MinHash run...");
+    let start_main = Instant::now();
+    let path_lookup = PathLookup::load_from_file(path_lookup).unwrap();
+    let lines_to_kill_paths = expand_dirs(vec![lines_to_kill_dir.clone()], Some(&[".gz"])).unwrap();
+    let lines_to_kill_paths: Vec<PathBuf> = lines_to_kill_paths
+            .into_iter()
+        .filter(|p| {
+            p.file_name()
+             .and_then(|b| b.to_str())
+             .map(|b_str| b_str.starts_with("lines_to_kill"))
+             .unwrap_or(false)
+        })
+        .collect();
+
+    println!("Merging {:?} lines-to-kill objects...", lines_to_kill_paths.len());
+    let merge_start = Instant::now();
+    let lines_to_kill_objects : Vec<HashMap<usize, HashSet<usize>>> = lines_to_kill_paths
+        .par_iter()
+        .map(|p| load_lines_to_kill(&p).unwrap())
+        .collect();
+    let global_lines_to_kill = merge_lines_to_kill(lines_to_kill_objects).unwrap();
+    println!("...merged lines-to-kill in {:?} seconds", merge_start.elapsed().as_secs());
+
+
+    // Phase 3: Chop all the lines
+    println!("Removing duplicates from pool...");
+    let start_scrub = Instant::now();
+    let (documents_seen, documents_removed) = scrub_all_paths(&path_lookup, global_lines_to_kill, &input, &output);
+    println!("... removed duplicates in {:?} seconds", start_scrub.elapsed().as_secs());
+
+
+    println!("-------------------------");
+    println!("Completing minhash run");
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    println!("Saw {:?} documents", documents_seen);
+    println!("Removed {:?} documents", documents_removed);
+    println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
+
+
+    Ok(())
+}
 
 
 
+/*=================================================================
+=                                 MAIN                            =
+=================================================================*/
+
+fn main() {
+    let args = ArgParser::parse();
+
+    let result = match &args.command {
+        Commands::MinHash {input, output, num_bands, band_size, ngram_size, num_docs, max_lines_per_path} => {
+            minhash(input, output, *num_bands, *band_size, *ngram_size, *num_docs, *max_lines_per_path)
+        },
+        Commands::PathLookup {input, output } => {
+            build_path_lookup_only(input, output)
+        },
+        Commands::BandSaver {path_lookup, output, band_group_id, band_start, num_bands, band_size, ngram_size, num_docs, max_lines_per_path} => {
+            band_saver(path_lookup, output, *band_group_id, *band_start, *num_bands, *band_size, *ngram_size, *num_docs, *max_lines_per_path)
+        },
+        Commands::BandLoader {input, lines_to_kill_dir, path_lookup, output} => {
+            band_loader(input, lines_to_kill_dir, path_lookup, output)
+        }
+    };
+    result.unwrap()
+}

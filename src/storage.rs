@@ -39,8 +39,10 @@ pub(crate) fn to_byte_size(n: usize) -> usize {
 
 pub(crate) fn compute_sig_size(num_docs: usize) -> usize {
 	// Computes how many bytes needed to store the signatures such that collisions don't occur
-	let num_pairs = (num_docs * (num_docs - 1) / 2) as usize;
-	to_byte_size(num_pairs)
+	// Overflow might be tricky here so need to do math
+	// log(n * (n-1) /2) = log(n) + log(n-1) - 1
+	let log_num_pairs = f64::log2(num_docs as f64) + f64::log2(num_docs as f64 - 1.0) - 1.0;
+	(log_num_pairs / 8.0 + 1.0).ceil() as usize
 }
 
 
@@ -185,7 +187,6 @@ impl IntValueEnum {
             IntValueEnum::Int120(value) => value.as_usize(),
             IntValueEnum::Int128(value) => value.as_usize(),
             // Add more cases for other IntN types
-            _ => panic!("Unsupported IntN type"),            
         }
 
     }
@@ -239,7 +240,6 @@ impl Hash for IntValueEnum {
             IntValueEnum::Int112(a) => a.hash(state),
             IntValueEnum::Int120(a) => a.hash(state),
             IntValueEnum::Int128(a) => a.hash(state),
-            _ => panic!("Unsupported IntN type"),
             // Add more cases for other IntN types
         }
     }
