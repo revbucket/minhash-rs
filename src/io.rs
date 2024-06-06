@@ -78,6 +78,20 @@ pub(crate) fn expand_dirs(paths: Vec<PathBuf>, manual_ext: Option<&[&str]>) -> R
 }
 
 
+pub fn has_json_extension(path: &PathBuf) -> bool {
+    if let Some(ext) = path.extension() {
+        if ext == "json" {
+            return true;
+        } else if let Some(ext_os_str) = path.extension() {
+            if let Some(ext_str) = ext_os_str.to_str() {
+                return ext_str.starts_with("json.");
+            }
+        }
+    }
+    false
+}
+
+
 /*====================================================================
 =                           Reading files                            =
 ====================================================================*/

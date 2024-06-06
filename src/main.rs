@@ -1,8 +1,8 @@
 
-use std::collections::{VecDeque, HashSet, HashMap};
+use std::collections::{VecDeque, HashMap};
 use std::hash::{Hash, Hasher, DefaultHasher};
 use anyhow::{Result, Error, anyhow};
-use std::path::{PathBuf, Path};
+use std::path::{PathBuf};
 use std::io::{BufRead};
 use rand::prelude::*;
 use tiktoken_rs::{p50k_base, CoreBPE};
@@ -15,8 +15,8 @@ use sha2::{Sha256, Digest};
 use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
 use clap::{Parser, Subcommand};
-use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_output_filename};
-use crate::storage::{BandStorage, BandStorageConfig, IntValueEnum, SignatureWriter, PathLookup};
+use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_output_filename, has_json_extension};
+use crate::storage::{IntValueEnum, SignatureWriter, MinHashConfig};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -132,7 +132,7 @@ enum Commands {
 
 
     }, 
-    BuildConfigs {
+    BuildConfig {
         // Just makes and saves the path lookup object 
 
         /// Input locations for paths to hash
@@ -159,7 +159,7 @@ enum Commands {
 
         /// Location of the pre-computed path lookup object
         #[arg(required=true, long)]
-        path_lookup: PathBuf,
+        config: PathBuf,
 
         /// Give a unique id for this run 
         #[arg(required=true, long)]
@@ -178,9 +178,6 @@ enum Commands {
         #[arg(long, default_value_t=5)]
         ngram_size: usize,   
 
-        #[arg(required=true, long)] // 10B docs by default?
-        storage_config_loc: PathBuf,
-
         #[arg(long, default_value_t=0)]
         path_chunk: usize,
 
@@ -198,26 +195,18 @@ enum Commands {
     },
 
     Finish {
-        /// Input directories (helpful for naming output files)
-        /// If left empty, this outputs according to the basename for each file
+        /// Path name of the config file
         #[arg(required=true, long)]
-        input: Vec<PathBuf>,
-
-        /// Where the path lookup lives 
-        #[arg(required=true, long)]
-        path_lookup: PathBuf,
-
-        /// Where the output files go 
-        #[arg(required=true, long)]
-        output: PathBuf,        
+        config: PathBuf,
 
         /// where the StorageConfig lives
         #[arg(required=true, long)]
         sig_storage: PathBuf,
 
-        /// where the StorageConfig lives
+        /// Where the output files go 
         #[arg(required=true, long)]
-        storage_config_loc: PathBuf,
+        output: PathBuf,        
+
     }
 
 }
@@ -252,7 +241,7 @@ Preprocessing flow is to use the slimpajama flow, and then tokenize with tiktoke
 
 
 fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size: usize, ngram_size: usize,
-                config: &BandStorageConfig, signature_writer: &SignatureWriter, num_sig_chunks: usize) -> Result<(), Error> {
+                config: &MinHashConfig, signature_writer: &SignatureWriter, num_sig_chunks: usize) -> Result<usize, Error> {
     // Setup things: load data, build tokenizer, etc
     let data = read_pathbuf_to_mem(path).unwrap();
     // let mut buffer = Vec::new();
@@ -262,10 +251,12 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
     let num_bands = band_seeds.len();
     let perm_seeds = _expand_band_seeds(&band_seeds, band_size);
     let path_id = IntValueEnum::new(path_id, config.path_size);
+    let mut docs_hashed = 0;
     for (line_num, line) in data.lines().enumerate() {
 
         let line_num = IntValueEnum::new(line_num, config.line_size);
         let line = line.unwrap();
+        docs_hashed += 1;
         let json: Value = serde_json::from_str(&line).unwrap();
         let text = json["text"].as_str().unwrap();
         let tokens = preprocess_text(text, &tokenizer);
@@ -280,7 +271,7 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
             //_save_band_signature(band_storage, *band_seed, band_signature, doc_id.clone());
         }
     }
-    Ok(())
+    Ok(docs_hashed)
 }
             
 
@@ -374,16 +365,6 @@ fn _expand_band_seeds(band_seeds: &Vec<u32>, band_size: usize) -> Vec<u64> {
     perm_seeds
 }
 
-fn _save_band_signature(band_storage: &BandStorage, band_seed: u64, band_signature: IntValueEnum, doc_id: (IntValueEnum, IntValueEnum)) -> () {
-    // TODO: ADD BAND SIGNATURE
-    band_storage
-        .entry(band_seed)
-        .or_insert_with(|| DashMap::new())
-        .entry(band_signature)
-        .or_default()
-        .push(doc_id);
-}
-
 fn _save_band_signature_to_disk(signature_writer: &SignatureWriter, band_seed: u32, band_signature: IntValueEnum, 
                                 path_id: IntValueEnum, line_num: IntValueEnum, num_sig_chunks: usize) -> Result<(), Error> {
 
@@ -397,11 +378,10 @@ fn _save_band_signature_to_disk(signature_writer: &SignatureWriter, band_seed: u
 =                      COLLECT DOCS TO DELETE                     =
 =================================================================*/
 
-fn aggregate_lines_to_kill(storage_config_loc: &PathBuf, sig_storage: &PathBuf) -> 
+fn aggregate_lines_to_kill(config: &MinHashConfig, sig_storage: &PathBuf) -> 
     Result<DashMap<usize, DashSet<usize>>, Error> {
     println!("Aggregating hashes into lines to kill...");
     let start_main = Instant::now();
-    let storage_config = BandStorageConfig::load(storage_config_loc).unwrap();
 
     // Gather all files in storage and group by (band, sigchunk)
     let stored_files : DashMap<(u32, usize), Vec<PathBuf>> = DashMap::new();
@@ -412,12 +392,12 @@ fn aggregate_lines_to_kill(storage_config_loc: &PathBuf, sig_storage: &PathBuf) 
             stored_files.entry(key).or_default().push(p.clone());
         });
 
-
+    println!("STORED FILES {:?}", stored_files);
     let lines_to_kill : DashMap<usize, DashSet<usize>> = DashMap::new();
     let lines_to_kill_pbar = build_pbar(stored_files.len(), "File groups");
     stored_files.par_iter()
         .for_each(|v| {
-            _augment_lines_to_kill(&lines_to_kill, &v, storage_config.sig_size, storage_config.path_size, storage_config.line_size).unwrap();
+            _augment_lines_to_kill(&lines_to_kill, &v, config.sig_size, config.path_size, config.line_size).unwrap();
             lines_to_kill_pbar.inc(1);
         });
 
@@ -476,18 +456,16 @@ fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths:
 Iterates over all paths seen, and removes the lines that we should from each
 If there are no lines to kill, just copy to output
 */
-fn scrub_all_paths(path_lookup: &PathLookup, lines_to_kill: DashMap<usize, DashSet<usize>>,
-                   input_dirs: &Vec<PathBuf>, output_directory: &PathBuf) -> (usize, usize) {
+fn scrub_all_paths(config: &MinHashConfig, lines_to_kill: DashMap<usize, DashSet<usize>>,
+                   output_directory: &PathBuf) -> (usize, usize) {
     // Iterate over threads with path lookup
     let documents_seen = AtomicUsize::new(0);
     let documents_removed = AtomicUsize::new(0);
-    let pbar = build_pbar(path_lookup.indices.len(), "Paths");
-    path_lookup.indices.par_iter().for_each(|entry| {
-        let input_filename = entry.key();
-        let path_id = entry.value();
-        let output_filename = get_output_filename(input_dirs, input_filename, output_directory);
-        let chopped_lines = lines_to_kill.get(path_id).map(|v| v.value().clone());
-        let (path_seen, path_removed) = chop_lines(input_filename, &output_filename, chopped_lines).unwrap();
+    let pbar = build_pbar(config.indices.len(), "Paths");
+    config.indices.par_iter().for_each(|(path,idx)| {
+        let output_filename = get_output_filename(&config.input, path, output_directory);
+        let chopped_lines = lines_to_kill.get(idx).map(|v| v.value().clone());
+        let (path_seen, path_removed) = chop_lines(path, &output_filename, chopped_lines).unwrap();
         documents_seen.fetch_add(path_seen, Ordering::SeqCst);
         documents_removed.fetch_add(path_removed, Ordering::SeqCst);
         pbar.inc(1);
@@ -594,54 +572,53 @@ fn minhash(input: &Vec<PathBuf>, output: &PathBuf, num_bands: u32, band_size: us
 */
 
 
-fn build_configs(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_lines_per_path: usize) -> Result<(), Error> {
+fn build_config(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_lines_per_path: usize,) -> Result<(), Error> {
     // Build and save the path lookup
-    let mut input_files = expand_dirs(input.clone(), None).unwrap();
-    input_files.sort(); // sort before building the path lookup
-    println!("Collected {:?} input files", input_files.len());
-    let path_lookup = PathLookup::new(input_files.clone());
-    let path_lookup_filename = output.clone().join("path_lookup.gz");
-    path_lookup.save_to_file(&path_lookup_filename).unwrap();
-
-    // Build and save the storage config 
-    let storage_config_filename = output.clone().join("storage_config.json");
-    let storage_config = BandStorageConfig::infer_new(num_docs, input_files.len(), max_lines_per_path);
-    storage_config.save(storage_config_filename).unwrap();
-
-    Ok(())
+    println!("Building config...");
+    let config = MinHashConfig::new(input, num_docs, max_lines_per_path).unwrap();
+    println!("Collected {:?} paths", config.len());
+    let output = if has_json_extension(output) {
+        output.clone() 
+    } else {
+        output.clone().join("config.json.gz")
+    };
+    config.save(&output)
 }
 
 
-fn hash_only(path_lookup: &PathBuf, band_group_id: usize, band_start: u32, num_bands: u32, 
-              band_size: usize, ngram_size: usize, storage_config_loc: &PathBuf,
+fn hash_only(config: &PathBuf, band_group_id: usize, band_start: u32, num_bands: u32, 
+              band_size: usize, ngram_size: usize, 
               path_chunk: usize, num_path_chunks: usize, num_sig_chunks: usize, sig_storage: &PathBuf,
               s3_storage: Option<&PathBuf>) -> Result<(), Error> {
     println!("Starting part of MinHash run (band group {:?})...", band_group_id);        
-    let start_main = Instant::now();
-    
-    // Load path lookup and setup things    
-    let path_lookup = PathLookup::load_from_file(path_lookup).unwrap();
+    let start_main = Instant::now();    
+
+    // Load config and setup things      
+    let config = MinHashConfig::load(config).unwrap();
     let band_seeds: Vec<u32> = if band_start == 0 {
         let mut rng = rand::thread_rng();
         (0..num_bands).map(|_| rng.gen()).collect()
     } else {
         (band_start..band_start+num_bands).collect()
     };
-    let band_storage_config = BandStorageConfig::load(storage_config_loc).unwrap();
     let signature_writer = SignatureWriter::new(sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
-    let chunk_paths = path_lookup.get_chunk(path_chunk, num_path_chunks);
+    let chunked_paths = config.get_chunk(path_chunk, num_path_chunks);
 
+    // Collect hashes to disk
     println!("Starting hash collection...");
     let start_hashing = Instant::now();
-    let hash_pbar = build_pbar(path_lookup.len(), "Paths");
-
-    chunk_paths.par_iter().for_each(|(path, path_id)| {
-        process_path(path, &band_seeds, *path_id, band_size, ngram_size, &band_storage_config,
+    let hash_pbar = build_pbar(chunked_paths.len(), "Paths");
+    let total_docs_hashed = AtomicUsize::new(0);
+    chunked_paths.par_iter().for_each(|(path, path_id)| {
+        let docs_hashed = process_path(path, &band_seeds, *path_id, band_size, ngram_size, &config,
                      &signature_writer, num_sig_chunks).unwrap();
+        total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
         hash_pbar.inc(1) // Claude promises me this is threadsafe with rayon
     });
+    signature_writer.finish().unwrap();
     println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
 
+    // Save to s3 if specified
     if !s3_storage.is_none() {
         let s3_storage = s3_storage.unwrap();
         let io_pairs = signature_writer.get_input_output_filenames(&s3_storage, path_chunk);
@@ -654,28 +631,29 @@ fn hash_only(path_lookup: &PathBuf, band_group_id: usize, band_start: u32, num_b
             });
     
     }
+
+    // Summarize outputs    
     println!("-------------------------");
     println!("Completing part of MinHash run (band group {:?} | path chunk {:?})", band_group_id, path_chunk);
+    println!("Computed hashes for {:?} bands, {:?} docs", num_bands, total_docs_hashed.into_inner());
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
     return Ok(());
 }
 
 
-fn finish_dedup(input: &Vec<PathBuf>, path_lookup: &PathBuf, output: &PathBuf, sig_storage: &PathBuf, 
-                storage_config_loc: &PathBuf) -> Result<(), Error> {
+fn finish_dedup(config:&PathBuf, sig_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
     println!("Finishing MinHash run...");
     let start_main = Instant::now();
-    let path_lookup = PathLookup::load_from_file(path_lookup).unwrap();
-
+    let config = MinHashConfig::load(config).unwrap();
 
     // Gather lines to kill
-    let lines_to_kill = aggregate_lines_to_kill(storage_config_loc, sig_storage).unwrap();
+    let lines_to_kill = aggregate_lines_to_kill(&config, sig_storage).unwrap();
 
 
     // And then chop all the lines
     println!("Removing duplicates from pool...");
     let start_scrub = Instant::now();
-    let (documents_seen, documents_removed) = scrub_all_paths(&path_lookup, lines_to_kill, &input, &output);
+    let (documents_seen, documents_removed) = scrub_all_paths(&config, lines_to_kill, &output);
     println!("... removed duplicates in {:?} seconds", start_scrub.elapsed().as_secs());
 
 
@@ -698,17 +676,17 @@ fn main() {
     let args = ArgParser::parse();
 
     let result = match &args.command {
-        Commands::BuildConfigs {input, output, num_docs, max_lines_per_path} => {
-            build_configs(input, output, *num_docs, *max_lines_per_path)
+        Commands::BuildConfig {input, output, num_docs, max_lines_per_path} => {
+            build_config(input, output, *num_docs, *max_lines_per_path)
         },
-        Commands::HashOnly {path_lookup, band_group_id, band_start, num_bands, band_size, ngram_size, storage_config_loc,
+        Commands::HashOnly {config, band_group_id, band_start, num_bands, band_size, ngram_size, 
                              path_chunk, num_path_chunks, num_sig_chunks, sig_storage, s3_storage} => {
-            hash_only(path_lookup, *band_group_id, *band_start, *num_bands, *band_size, *ngram_size, storage_config_loc,
+            hash_only(config, *band_group_id, *band_start, *num_bands, *band_size, *ngram_size,
                        *path_chunk, *num_path_chunks, *num_sig_chunks, sig_storage, s3_storage.as_ref())
         },
 
-        Commands::Finish {input, path_lookup, output, sig_storage, storage_config_loc,} => {
-            finish_dedup(input, path_lookup, output, sig_storage, storage_config_loc)        
+        Commands::Finish {config, sig_storage, output} => {
+            finish_dedup(config, sig_storage, output)        
         }, 
         _ => { Ok(()) }
 

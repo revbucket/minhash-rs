@@ -22,16 +22,16 @@ line_num: identifier for which line num within a file
 
 */
 use std::collections::HashMap;
-use std::io::{BufReader, BufRead, BufWriter, Cursor, Write};
+use std::io::{BufWriter, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::fs::{OpenOptions, File, create_dir_all};
-use std::path::{PathBuf, Path};
+use std::path::{PathBuf};
 use std::sync::{Arc, Mutex};
 use std::cmp::{PartialEq, Eq};
 use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
 use anyhow::{Result, Error};
-use crate::io::{read_pathbuf_to_mem, write_mem_to_pathbuf};
+use crate::io::{read_pathbuf_to_mem, write_mem_to_pathbuf, expand_dirs};
 use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
 
@@ -45,7 +45,12 @@ use rayon::prelude::*;
 
 pub(crate) fn to_byte_size(n: usize) -> usize {
 	// Calculates number of bytes needed to store n unique elements
-	(f64::log2(n as f64) / 8.0 + 1.0).ceil() as usize
+	let byte_size =(f64::log2(n as f64 ) / 8.0).ceil() as usize;
+	if byte_size == 0 {
+		1
+	} else {
+		byte_size
+	}
 }
 
 pub(crate) fn compute_sig_size(num_docs: usize) -> usize {
@@ -53,7 +58,13 @@ pub(crate) fn compute_sig_size(num_docs: usize) -> usize {
 	// Overflow might be tricky here so need to do math
 	// log(n * (n-1) /2) = log(n) + log(n-1) - 1
 	let log_num_pairs = f64::log2(num_docs as f64) + f64::log2(num_docs as f64 - 1.0) - 1.0;
-	(log_num_pairs / 8.0 + 1.0).ceil() as usize
+	let sig_size = (log_num_pairs / 8.0).ceil() as usize;
+	if sig_size == 0 {
+		1
+	} else {
+		sig_size
+	}
+
 }
 
 
@@ -341,6 +352,82 @@ impl PathLookup {
 }
 
 
+/*==========================================================
+=                     MinHash Config                       =
+==========================================================*/
+/*
+Object that should be built for EVERY MinHash run.
+Holds:
+	- the specified directories for input 
+	- the mapping of filenames -> indices 
+	- the number of bytes required to store a 
+		+ signature
+		+ path 
+		+ line number
+
+And supports methods to:
+- load/save from file/s3
+- get "path chunks" 
+- access attributes (i.e., number of paths)
+*/
+
+#[derive(Serialize, Deserialize)]
+pub struct MinHashConfig {
+	pub input: Vec<PathBuf>,
+	pub indices: HashMap<PathBuf, usize>,
+	pub sig_size: usize,
+	pub path_size: usize,
+	pub line_size: usize
+}
+
+impl MinHashConfig {
+	pub fn new(input: &Vec<PathBuf>, num_docs: usize, max_lines_per_path: usize) -> Result<Self, Error> {
+		// First gather all files 
+		let paths = expand_dirs(input.clone(), None).unwrap();
+		let num_paths = paths.len();
+		let path_size = to_byte_size(num_paths);
+		let line_size = to_byte_size(max_lines_per_path);
+		let sig_size = compute_sig_size(num_docs);
+		let indices : HashMap<PathBuf, usize> = paths.iter()
+			.enumerate()
+			.map(|(i, p)| (p.clone(), i))
+			.collect();
+		Ok(MinHashConfig {input: input.clone(),
+						  indices, 
+						  sig_size,
+						  path_size,
+						  line_size})
+	}
+
+	pub fn save(&self, save_loc: &PathBuf) -> Result<(), Error> {
+		let json_bytes = serde_json::to_vec(self).unwrap();
+		write_mem_to_pathbuf(&json_bytes, &save_loc)
+	}
+
+	pub fn load(load_loc: &PathBuf) -> Result<Self, Error> {
+		let json_bytes = read_pathbuf_to_mem(&load_loc).unwrap();
+		let cursor = json_bytes.into_inner();
+		let binding = cursor.into_inner();
+		let contents = binding.as_slice();
+		let config: MinHashConfig = serde_json::from_slice(&contents).unwrap();		
+		Ok(config)
+	}
+
+	pub fn get_chunk(&self, chunk_id: usize, num_chunks: usize) -> Vec<(PathBuf, usize)> {
+        let chunk : Vec<(PathBuf, usize)> = self.indices.iter()
+             .filter(|(_k, v)| *v % num_chunks == chunk_id)
+             .map(|(k, v)| (k.clone(), *v))
+             .collect();
+        chunk		
+	}
+
+	pub fn len(&self) -> usize {
+		self.indices.len()
+	}
+}
+
+
+
 
 /*==========================================================
 =                     Band Storage Config.                 =
@@ -383,8 +470,6 @@ impl BandStorageConfig {
 
 
 
-pub(crate) type BandStorage = DashMap<u64, DashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum)>>>;
-
 
 /*==========================================================
 =                     Signature Writer                     =
@@ -394,7 +479,6 @@ pub struct SignatureWriter {
 	storage_loc: PathBuf,
 	band_ids: Vec<u32>,
 	num_sig_chunks: usize,
-	path_chunk: usize
 }
 
 impl SignatureWriter {
@@ -405,9 +489,6 @@ impl SignatureWriter {
 		for band_id in &band_ids {
 			for sig_chunk in 0..num_sig_chunks {
 				let filename = SignatureWriter::get_filename(storage_loc, *band_id, sig_chunk, path_chunk);
-				let filename = storage_loc.clone()
-					.join(format!("band_{:016}", band_id))
-					.join(format!("sigchunk{:08}_pathchunk{:08}.bin", sig_chunk, path_chunk));
 				if let Some(parent_dir) = filename.parent() {
 			        if !parent_dir.exists() {
 			            create_dir_all(parent_dir).unwrap()
@@ -426,7 +507,7 @@ impl SignatureWriter {
 				writer.insert((*band_id, sig_chunk), sigwriter);			
 			}
 		}
-		SignatureWriter { writer, storage_loc: storage_loc.clone(), band_ids: band_ids.clone(), num_sig_chunks, path_chunk }
+		SignatureWriter { writer, storage_loc: storage_loc.clone(), band_ids: band_ids.clone(), num_sig_chunks }
 	}
 
 	pub fn get_filename(storage_loc: &PathBuf, band_id: u32, sig_chunk: usize, path_chunk: usize) -> PathBuf {
@@ -453,6 +534,13 @@ impl SignatureWriter {
 		let mut sigwriter = binding.lock().unwrap();
 		sigwriter.write_all(&contents).unwrap();
 
+		Ok(())
+	}
+
+	pub fn finish(&self) -> Result<(), Error> {
+		// Flushes all the open writers
+		self.writer.par_iter()
+			.for_each(|entry| entry.value().lock().unwrap().flush().unwrap());
 		Ok(())
 	}
 }
