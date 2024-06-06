@@ -103,6 +103,7 @@ struct ArgParser {
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[clap(arg_required_else_help = true)]
+
     MinHash { 
         /// (List of) directories/files (on s3 or local) that are jsonl.gz or jsonl.zstd files
         #[arg(required=true, long, num_args=1..)]
@@ -111,6 +112,15 @@ enum Commands {
         /// Output location (may be an s3 uri)
         #[arg(required=true, long)]
         output: PathBuf,
+
+        #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
+        num_docs: usize,
+
+        #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
+        max_lines_per_path: usize,
+
+        #[arg(required=true, long)]
+        sig_storage: PathBuf,
 
 
         #[arg(long, default_value_t=13)]
@@ -121,17 +131,8 @@ enum Commands {
 
         #[arg(long, default_value_t=5)]
         ngram_size: usize,   
-
-        #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
-        num_docs: usize,
-
-        #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
-        max_lines_per_path: usize,
-
-
-
-
     }, 
+
     BuildConfig {
         // Just makes and saves the path lookup object 
 
@@ -178,8 +179,8 @@ enum Commands {
         #[arg(long, default_value_t=5)]
         ngram_size: usize,   
 
-        #[arg(long, default_value_t=0)]
-        path_chunk: usize,
+        #[arg(long, num_args=1.., default_value ="0,")]
+        path_chunk: Vec<usize>,
 
         #[arg(long, default_value_t=1)]  
         num_path_chunks: usize,
@@ -511,65 +512,15 @@ fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: O
 =                             Subcommands                         =
 =================================================================*/
 
-/*
-fn minhash(input: &Vec<PathBuf>, output: &PathBuf, num_bands: u32, band_size: usize, ngram_size: usize, num_docs: usize, max_lines_per_path: usize) -> Result<(), Error>{
-    println!("Starting MinHash run...");    
-    let start_main = Instant::now();
-    // Phase 0: Setup, collect filenames, build path lookup, build band seeds
-    let mut input_files = expand_dirs(input.clone(), None).unwrap();
-    input_files.sort(); // sort before building the path lookup
-    println!("Collected {:?} input files", input_files.len());
-    let path_lookup = PathLookup::new(input_files.clone());
-    let band_seeds: Vec<u32> = (0..num_bands).map(|i| i as u32).collect();
+fn minhash(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_lines_per_path: usize, 
+           sig_storage: &PathBuf, num_bands: u32, band_size: usize, ngram_size: usize) -> Result<(), Error> {
+    // Note: this is only for SMALL runs. We set some hyperparameters for you, and this isn't optimized for these use cases
+    let config_name = sig_storage.clone().join("config.jsonl.gz");
 
-
-    let sig_size = compute_sig_size(num_docs);
-    let path_size = to_byte_size(path_lookup.len());
-    let line_size = to_byte_size(max_lines_per_path);
-    println!("SIZES {:?} {:?} {:?}", sig_size, path_size, line_size);
-    let band_storage_config = BandStorageConfig { sig_size, path_size, line_size };
-
-    // Phase 1: Collect hashes for everything
-    println!("Starting hash collection...");
-    let start_hashing = Instant::now();
-
-    let band_storage = BandStorage::new();
-    let hash_pbar = build_pbar(input_files.len(), "Paths");
-    path_lookup.indices.par_iter().for_each(|entry| {
-        let input_filename = entry.key();
-        let path_id = entry.value();
-        process_path(input_filename, &band_seeds, *path_id, band_size, ngram_size, &band_storage, &band_storage_config).unwrap();
-        hash_pbar.inc(1) // Claude promises me this is threadsafe
-    });
-    //let band_storage_size = est_storage_size_in_bytes(&band_storage);
-    println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
-
-    // Phase 2: Build Build lines to kill 
-    println!("Collecting which documents to remove...");
-    let start_line_to_kill = Instant::now();
-    let lines_to_kill = build_lines_to_kill(&band_storage);
-    println!("...collected which lines to kill in {:?} seconds", start_line_to_kill.elapsed().as_secs());
-    save_lines_to_kill(lines_to_kill.clone(), &Path::join(&output, "lines_to_kill.gz")).unwrap();
-
-    // Phase 3: Chop all the lines
-    println!("Removing duplicates from pool...");
-    let start_scrub = Instant::now();
-    let (documents_seen, documents_removed) = scrub_all_paths(&path_lookup, lines_to_kill, &input, &output);
-    println!("... removed duplicates in {:?} seconds", start_scrub.elapsed().as_secs());
-
-
-    // Final report
-    println!("-------------------------");
-    println!("Completing minhash run");
-    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    //println!("Band storage size {}", human_bytes(band_storage_size as f64));
-    println!("Saw {:?} documents", documents_seen);
-    println!("Removed {:?} documents", documents_removed);
-    println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
-
-    Ok(())
+    build_config(input, &config_name, num_docs, max_lines_per_path).unwrap();
+    hash_only(&config_name, 0, 1, num_bands, band_size, ngram_size, &vec![0 as usize], 1, 32, sig_storage, None).unwrap();
+    finish_dedup(&config_name, sig_storage, output)
 }
-*/
 
 
 fn build_config(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_lines_per_path: usize,) -> Result<(), Error> {
@@ -588,7 +539,7 @@ fn build_config(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_lin
 
 fn hash_only(config: &PathBuf, band_group_id: usize, band_start: u32, num_bands: u32, 
               band_size: usize, ngram_size: usize, 
-              path_chunk: usize, num_path_chunks: usize, num_sig_chunks: usize, sig_storage: &PathBuf,
+              path_chunk: &Vec<usize>, num_path_chunks: usize, num_sig_chunks: usize, sig_storage: &PathBuf,
               s3_storage: Option<&PathBuf>) -> Result<(), Error> {
     println!("Starting part of MinHash run (band group {:?})...", band_group_id);        
     let start_main = Instant::now();    
@@ -601,40 +552,42 @@ fn hash_only(config: &PathBuf, band_group_id: usize, band_start: u32, num_bands:
     } else {
         (band_start..band_start+num_bands).collect()
     };
-    let signature_writer = SignatureWriter::new(sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
-    let chunked_paths = config.get_chunk(path_chunk, num_path_chunks);
+    let total_docs_hashed = AtomicUsize::new(0);    
+    for cur_chunk in path_chunk {
+        let cur_chunk = *cur_chunk;
+        let signature_writer = SignatureWriter::new(sig_storage, band_seeds.clone(), num_sig_chunks, cur_chunk);
+        let chunked_paths = config.get_chunk(cur_chunk, num_path_chunks);
 
-    // Collect hashes to disk
-    println!("Starting hash collection...");
-    let start_hashing = Instant::now();
-    let hash_pbar = build_pbar(chunked_paths.len(), "Paths");
-    let total_docs_hashed = AtomicUsize::new(0);
-    chunked_paths.par_iter().for_each(|(path, path_id)| {
-        let docs_hashed = process_path(path, &band_seeds, *path_id, band_size, ngram_size, &config,
-                     &signature_writer, num_sig_chunks).unwrap();
-        total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
-        hash_pbar.inc(1) // Claude promises me this is threadsafe with rayon
-    });
-    signature_writer.finish().unwrap();
-    println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
+        // Collect hashes to disk
+        println!("(Chunk {:?}) Starting hash collection... ", cur_chunk);
+        let start_hashing = Instant::now();
+        let hash_pbar = build_pbar(chunked_paths.len(), "Paths");
+        chunked_paths.par_iter().for_each(|(path, path_id)| {
+            let docs_hashed = process_path(path, &band_seeds, *path_id, band_size, ngram_size, &config,
+                         &signature_writer, num_sig_chunks).unwrap();
+            total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
+            hash_pbar.inc(1) // Claude promises me this is threadsafe with rayon
+        });
+        signature_writer.finish().unwrap();
+        println!("(Chunk {:?}) ...collected all hashes in {:?} seconds", cur_chunk, start_hashing.elapsed().as_secs());
 
-    // Save to s3 if specified
-    if !s3_storage.is_none() {
-        let s3_storage = s3_storage.unwrap();
-        let io_pairs = signature_writer.get_input_output_filenames(&s3_storage, path_chunk);
-        io_pairs.par_iter()
-            .for_each(|(input_path, output_path)| {
-                let data = read_pathbuf_to_mem(&input_path).unwrap();
-                let data = data.into_inner().into_inner();
-                let data = data.as_slice();
-                write_mem_to_pathbuf(&data, &output_path).unwrap();
+        // Save to s3 if specified
+        if !s3_storage.is_none() {
+            let s3_storage = s3_storage.unwrap();
+            let io_pairs = signature_writer.get_input_output_filenames(&s3_storage, cur_chunk);
+            io_pairs.par_iter()
+                .for_each(|(input_path, output_path)| {
+                    let data = read_pathbuf_to_mem(&input_path).unwrap();
+                    let data = data.into_inner().into_inner();
+                    let data = data.as_slice();
+                    write_mem_to_pathbuf(&data, &output_path).unwrap();
             });
-    
+        }
     }
 
     // Summarize outputs    
     println!("-------------------------");
-    println!("Completing part of MinHash run (band group {:?} | path chunk {:?})", band_group_id, path_chunk);
+    println!("Completing part of MinHash run (band group {:?} | path chunk(s) {:?})", band_group_id, path_chunk);
     println!("Computed hashes for {:?} bands, {:?} docs", num_bands, total_docs_hashed.into_inner());
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
     return Ok(());
@@ -676,20 +629,22 @@ fn main() {
     let args = ArgParser::parse();
 
     let result = match &args.command {
+        Commands::MinHash {input, output, num_docs, max_lines_per_path, sig_storage, num_bands, band_size, ngram_size} => {
+            minhash(input, output, *num_docs, *max_lines_per_path, sig_storage, *num_bands, *band_size, *ngram_size)
+        }
+
         Commands::BuildConfig {input, output, num_docs, max_lines_per_path} => {
             build_config(input, output, *num_docs, *max_lines_per_path)
         },
         Commands::HashOnly {config, band_group_id, band_start, num_bands, band_size, ngram_size, 
                              path_chunk, num_path_chunks, num_sig_chunks, sig_storage, s3_storage} => {
             hash_only(config, *band_group_id, *band_start, *num_bands, *band_size, *ngram_size,
-                       *path_chunk, *num_path_chunks, *num_sig_chunks, sig_storage, s3_storage.as_ref())
+                       path_chunk, *num_path_chunks, *num_sig_chunks, sig_storage, s3_storage.as_ref())
         },
 
         Commands::Finish {config, sig_storage, output} => {
             finish_dedup(config, sig_storage, output)        
-        }, 
-        _ => { Ok(()) }
-
+        }
     };
     result.unwrap()
 }
