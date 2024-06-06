@@ -21,11 +21,22 @@ line_num: identifier for which line num within a file
 	where signature needs to be big enough to not allow collisions
 
 */
-
-
+use std::collections::HashMap;
+use std::io::{BufReader, BufRead, BufWriter, Cursor, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::fs::{OpenOptions, File, create_dir_all};
+use std::path::{PathBuf, Path};
+use std::sync::{Arc, Mutex};
 use std::cmp::{PartialEq, Eq};
 use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
+use anyhow::{Result, Error};
+use crate::io::{read_pathbuf_to_mem, write_mem_to_pathbuf};
+use serde::{Deserialize, Serialize};
+use rayon::prelude::*;
+
+
+
 
 /*=========================================================
 =                         Helpful byte math               =
@@ -168,6 +179,30 @@ impl IntValueEnum {
         }
     }
 
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        match self {
+            IntValueEnum::Int8(value) => value.as_bytes(),
+            IntValueEnum::Int16(value) => value.as_bytes(),
+            IntValueEnum::Int24(value) => value.as_bytes(),
+            IntValueEnum::Int32(value) => value.as_bytes(),
+            IntValueEnum::Int40(value) => value.as_bytes(),
+            IntValueEnum::Int48(value) => value.as_bytes(),
+            IntValueEnum::Int56(value) => value.as_bytes(),
+            IntValueEnum::Int64(value) => value.as_bytes(),
+            IntValueEnum::Int72(value) => value.as_bytes(),
+            IntValueEnum::Int80(value) => value.as_bytes(),
+            IntValueEnum::Int88(value) => value.as_bytes(),
+            IntValueEnum::Int96(value) => value.as_bytes(),
+            IntValueEnum::Int104(value) => value.as_bytes(),
+            IntValueEnum::Int112(value) => value.as_bytes(),
+            IntValueEnum::Int120(value) => value.as_bytes(),
+            IntValueEnum::Int128(value) => value.as_bytes(),
+            // Add more cases for other IntN types
+        }
+
+    }
+
+
     pub(crate) fn as_usize(&self) -> usize {
         match self {
             IntValueEnum::Int8(value) => value.as_usize(),
@@ -248,18 +283,156 @@ impl Hash for IntValueEnum {
 
 
 
+/*=================================================================
+=                               PATH LOOKUP                       =
+=================================================================*/
+/*
+Struct that saves the order of files. Useful for making sure we have the same order.
+Basically just used to map filenames to usizes and vice versa so we only have to
+pass around indices vs whole strings
+*/
+pub struct PathLookup {
+    //paths: Vec<PathBuf>,
+    pub indices: DashMap<PathBuf, usize>,
+}
+
+impl PathLookup {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        let indices = Self::build_indices(&paths);
+        PathLookup {// paths, 
+                    indices }
+    }
+
+    pub fn build_indices(paths: &Vec<PathBuf>) -> DashMap<PathBuf, usize> {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.clone(), index))
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub fn get_chunk(&self, chunk_id: usize, num_chunks: usize) -> Vec<(PathBuf, usize)>{
+        let chunk : Vec<(PathBuf, usize)> = self.indices.iter()
+             .filter(|entry| entry.value() % num_chunks == chunk_id)
+             .map(|entry| (entry.key().clone(), *entry.value()))
+             .collect();
+        chunk
+    }
+
+    pub fn save_to_file(&self, file_path: &PathBuf) -> Result<(), Error> {
+        let hash_indices: HashMap<_, _> = self.indices.clone().into_par_iter().collect();
+        let serialized = serde_json::to_vec(&hash_indices)?;
+        write_mem_to_pathbuf(&serialized, file_path)
+    }
+
+    pub fn load_from_file(file_path: &PathBuf) -> Result<Self> {
+        let contents = read_pathbuf_to_mem(file_path).unwrap();
+        let deserialized: HashMap<PathBuf, usize> = serde_json::from_reader(contents)?;
+        let mut pairs: Vec<(PathBuf, usize)> = deserialized.into_iter().collect();
+        pairs.sort_by_key(|&(_, id)| id);
+        let paths = pairs.into_iter().map(|(path, _)| path).collect();
+        Ok(PathLookup::new(paths))
+    }
+
+}
+
+
+
 /*==========================================================
 =                     Band Storage Config.                 =
 ==========================================================*/
-
+#[derive(Serialize, Deserialize)]
 pub struct BandStorageConfig {
 	pub sig_size: usize,
 	pub path_size: usize,
 	pub line_size: usize,
 }
 
+impl BandStorageConfig {
+	pub fn new(sig_size: usize, path_size: usize, line_size: usize) -> Self {
+		BandStorageConfig {sig_size, path_size, line_size}
+	}
+
+	pub fn infer_new(num_docs: usize, num_paths: usize, max_lines_per_doc: usize) -> Self {
+		let sig_size = compute_sig_size(num_docs);
+		let path_size = to_byte_size(num_paths);
+		let line_size = to_byte_size(max_lines_per_doc);
+		BandStorageConfig {sig_size, path_size, line_size}
+	}
+
+	pub fn save(&self, save_loc: PathBuf) -> Result<(), Error> {
+		// Save to json here 
+		let json_bytes = serde_json::to_vec(self).unwrap();
+		write_mem_to_pathbuf(&json_bytes, &save_loc)
+	}
+
+	pub fn load(load_loc: &PathBuf) -> Result<Self, Error> {
+		// Load from json at load_loc
+		let json_bytes = read_pathbuf_to_mem(&load_loc).unwrap();
+		let cursor = json_bytes.into_inner();
+		let binding = cursor.into_inner();
+		let contents = binding.as_slice();
+		let config: BandStorageConfig = serde_json::from_slice(&contents).unwrap();		
+		Ok(config)
+	}
+}
+
+
+
 pub(crate) type BandStorage = DashMap<u64, DashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum)>>>;
 
 
+/*==========================================================
+=                     Signature Writer                     =
+==========================================================*/
+pub struct SignatureWriter {
+	pub writer: DashMap<(u32, usize), Arc<Mutex<BufWriter<File>>>>,
 
+}
 
+impl SignatureWriter {
+	pub fn new(storage_loc: &PathBuf, band_ids: Vec<u32>, num_sig_chunks: usize, path_chunk: usize) -> Self {
+		let writer : DashMap<(u32, usize), Arc<Mutex<BufWriter<File>>>> = DashMap::new();
+		// Create writers into |band_ids|
+		println!("NEED TO OPEN {:?} FILES", band_ids.len() * num_sig_chunks);
+		for band_id in band_ids {
+			for sig_chunk in 0..num_sig_chunks {
+				let filename = storage_loc.clone()
+					.join(format!("band_{:016}", band_id))
+					.join(format!("sigchunk{:08}_pathchunk{:08}.bin", sig_chunk, path_chunk));
+				if let Some(parent_dir) = filename.parent() {
+			        if !parent_dir.exists() {
+			            create_dir_all(parent_dir).unwrap()
+			         }
+			    }
+				let sigwriter = Arc::new(
+					Mutex::new(
+					BufWriter::new(
+					OpenOptions::new()
+					.append(true)
+					.create(true)
+					.mode(0o644)
+					.open(filename)
+					.unwrap()
+				)));
+				writer.insert((band_id, sig_chunk), sigwriter);			
+			}
+		}
+		SignatureWriter { writer }
+	}
+
+	pub fn write_line(&self, band_id: u32, sig_chunk: usize, contents: Vec<u8>) -> Result<(), Error> {
+		let key = (band_id, sig_chunk);
+		assert_eq!(contents.len(), 16);
+
+		let binding = self.writer.get(&key).unwrap();
+		let mut sigwriter = binding.lock().unwrap();
+		sigwriter.write_all(&contents).unwrap();
+
+		Ok(())
+	}
+}
