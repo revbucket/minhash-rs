@@ -449,8 +449,6 @@ impl SignatureWriter {
 
 	pub fn write_line(&self, band_id: u32, sig_chunk: usize, contents: Vec<u8>) -> Result<(), Error> {
 		let key = (band_id, sig_chunk);
-		assert_eq!(contents.len(), 16);
-
 		let binding = self.writer.get(&key).unwrap();
 		let mut sigwriter = binding.lock().unwrap();
 		sigwriter.write_all(&contents).unwrap();
