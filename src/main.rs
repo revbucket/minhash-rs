@@ -16,7 +16,7 @@ use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
 use clap::{Parser, Subcommand};
 use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_output_filename};
-use crate::storage::{to_byte_size, compute_sig_size, BandStorage, BandStorageConfig, IntValueEnum, SignatureWriter, PathLookup};
+use crate::storage::{BandStorage, BandStorageConfig, IntValueEnum, SignatureWriter, PathLookup};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -154,7 +154,7 @@ enum Commands {
         max_lines_per_path: usize,
     },
 
-    Hashonly {
+    HashOnly {
         // Just runs and saves the hashes
 
         /// Location of the pre-computed path lookup object
@@ -191,7 +191,10 @@ enum Commands {
         num_sig_chunks: usize,
 
         #[arg(required=true, long)]
-        sig_storage: PathBuf        
+        sig_storage: PathBuf,
+
+        #[arg(long)]     
+        s3_storage: Option<PathBuf>
     },
 
     Finish {
@@ -425,16 +428,15 @@ fn aggregate_lines_to_kill(storage_config_loc: &PathBuf, sig_storage: &PathBuf) 
 
     
 fn _extract_bandid_sigchunk(path: &PathBuf) -> Result<(u32, usize), Error> {
-    let file_name = path.file_name().unwrap().to_str().unwrap();
-    let re = Regex::new(r"band_(\d+)/sigchunk(\d+)_filechunk\d+\.bin").unwrap();
-    
-    if let Some(captures) = re.captures(file_name) {
-        let band = captures[1].parse::<u32>().ok().unwrap();
-        let sigchunk = captures[2].parse::<usize>().ok().unwrap();
-        Ok((band, sigchunk))
-    } else {        
-        Err(anyhow!("Failed to extract band_id/sig_chunk"))
+    let re = Regex::new(r"band_(\d+)/sigchunk(\d+)").unwrap();
+    if let Some(path_str) = path.to_str() {
+        if let Some(captures) = re.captures(path_str) {
+            let band_number = captures[1].parse::<u32>().unwrap();
+            let sigchunk_number = captures[2].parse::<usize>().unwrap();
+            return Ok((band_number, sigchunk_number));
+        }
     }
+    Err(anyhow!("Failed to extract band_id/sig_chunk!"))
 }
 
 
@@ -612,7 +614,8 @@ fn build_configs(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_li
 
 fn hash_only(path_lookup: &PathBuf, band_group_id: usize, band_start: u32, num_bands: u32, 
               band_size: usize, ngram_size: usize, storage_config_loc: &PathBuf,
-              path_chunk: usize, num_path_chunks: usize, num_sig_chunks: usize, sig_storage: &PathBuf) -> Result<(), Error> {
+              path_chunk: usize, num_path_chunks: usize, num_sig_chunks: usize, sig_storage: &PathBuf,
+              s3_storage: Option<&PathBuf>) -> Result<(), Error> {
     println!("Starting part of MinHash run (band group {:?})...", band_group_id);        
     let start_main = Instant::now();
     
@@ -626,25 +629,33 @@ fn hash_only(path_lookup: &PathBuf, band_group_id: usize, band_start: u32, num_b
     };
     let band_storage_config = BandStorageConfig::load(storage_config_loc).unwrap();
     let signature_writer = SignatureWriter::new(sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
-    let path_chunk = path_lookup.get_chunk(path_chunk, num_path_chunks);
+    let chunk_paths = path_lookup.get_chunk(path_chunk, num_path_chunks);
 
     println!("Starting hash collection...");
     let start_hashing = Instant::now();
     let hash_pbar = build_pbar(path_lookup.len(), "Paths");
 
-    path_chunk.par_iter().for_each(|(path, path_id)| {
+    chunk_paths.par_iter().for_each(|(path, path_id)| {
         process_path(path, &band_seeds, *path_id, band_size, ngram_size, &band_storage_config,
                      &signature_writer, num_sig_chunks).unwrap();
         hash_pbar.inc(1) // Claude promises me this is threadsafe with rayon
     });
     println!("...collected all hashes in {:?} seconds", start_hashing.elapsed().as_secs());
 
-    let save_to_s3 = false; 
-    if save_to_s3 {
-        ()
+    if !s3_storage.is_none() {
+        let s3_storage = s3_storage.unwrap();
+        let io_pairs = signature_writer.get_input_output_filenames(&s3_storage, path_chunk);
+        io_pairs.par_iter()
+            .for_each(|(input_path, output_path)| {
+                let data = read_pathbuf_to_mem(&input_path).unwrap();
+                let data = data.into_inner().into_inner();
+                let data = data.as_slice();
+                write_mem_to_pathbuf(&data, &output_path).unwrap();
+            });
+    
     }
     println!("-------------------------");
-    println!("Completing part of MinHash run (band group {:?} | )", band_group_id);
+    println!("Completing part of MinHash run (band group {:?} | path chunk {:?})", band_group_id, path_chunk);
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
     return Ok(());
 }
@@ -690,10 +701,10 @@ fn main() {
         Commands::BuildConfigs {input, output, num_docs, max_lines_per_path} => {
             build_configs(input, output, *num_docs, *max_lines_per_path)
         },
-        Commands::Hashonly {path_lookup, band_group_id, band_start, num_bands, band_size, ngram_size, storage_config_loc,
-                             path_chunk, num_path_chunks, num_sig_chunks, sig_storage} => {
+        Commands::HashOnly {path_lookup, band_group_id, band_start, num_bands, band_size, ngram_size, storage_config_loc,
+                             path_chunk, num_path_chunks, num_sig_chunks, sig_storage, s3_storage} => {
             hash_only(path_lookup, *band_group_id, *band_start, *num_bands, *band_size, *ngram_size, storage_config_loc,
-                       *path_chunk, *num_path_chunks, *num_sig_chunks, sig_storage)
+                       *path_chunk, *num_path_chunks, *num_sig_chunks, sig_storage, s3_storage.as_ref())
         },
 
         Commands::Finish {input, path_lookup, output, sig_storage, storage_config_loc,} => {

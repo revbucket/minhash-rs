@@ -391,7 +391,10 @@ pub(crate) type BandStorage = DashMap<u64, DashMap<IntValueEnum, Vec<(IntValueEn
 ==========================================================*/
 pub struct SignatureWriter {
 	pub writer: DashMap<(u32, usize), Arc<Mutex<BufWriter<File>>>>,
-
+	storage_loc: PathBuf,
+	band_ids: Vec<u32>,
+	num_sig_chunks: usize,
+	path_chunk: usize
 }
 
 impl SignatureWriter {
@@ -399,8 +402,9 @@ impl SignatureWriter {
 		let writer : DashMap<(u32, usize), Arc<Mutex<BufWriter<File>>>> = DashMap::new();
 		// Create writers into |band_ids|
 		println!("NEED TO OPEN {:?} FILES", band_ids.len() * num_sig_chunks);
-		for band_id in band_ids {
+		for band_id in &band_ids {
 			for sig_chunk in 0..num_sig_chunks {
+				let filename = SignatureWriter::get_filename(storage_loc, *band_id, sig_chunk, path_chunk);
 				let filename = storage_loc.clone()
 					.join(format!("band_{:016}", band_id))
 					.join(format!("sigchunk{:08}_pathchunk{:08}.bin", sig_chunk, path_chunk));
@@ -419,10 +423,28 @@ impl SignatureWriter {
 					.open(filename)
 					.unwrap()
 				)));
-				writer.insert((band_id, sig_chunk), sigwriter);			
+				writer.insert((*band_id, sig_chunk), sigwriter);			
 			}
 		}
-		SignatureWriter { writer }
+		SignatureWriter { writer, storage_loc: storage_loc.clone(), band_ids: band_ids.clone(), num_sig_chunks, path_chunk }
+	}
+
+	pub fn get_filename(storage_loc: &PathBuf, band_id: u32, sig_chunk: usize, path_chunk: usize) -> PathBuf {
+		storage_loc.clone()
+			.join(format!("band_{:016}", band_id))
+			.join(format!("sigchunk{:08}_pathchunk{:08}.bin", sig_chunk, path_chunk))
+	}
+
+	pub fn get_input_output_filenames(&self, output_loc: &PathBuf, path_chunk: usize) -> Vec<(PathBuf, PathBuf)> {
+		let mut io_pairs : Vec<(PathBuf, PathBuf)> = Vec::new();
+		for band_id in &self.band_ids {
+			for sig_chunk in 0..self.num_sig_chunks {
+				let input_filename = SignatureWriter::get_filename(&self.storage_loc, *band_id, sig_chunk, path_chunk);
+				let output_filename = SignatureWriter::get_filename(output_loc, *band_id, sig_chunk, path_chunk);
+				io_pairs.push((input_filename, output_filename));
+			}
+		}
+		io_pairs
 	}
 
 	pub fn write_line(&self, band_id: u32, sig_chunk: usize, contents: Vec<u8>) -> Result<(), Error> {
