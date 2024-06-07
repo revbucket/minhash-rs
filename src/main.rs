@@ -20,10 +20,10 @@ use crate::storage::{IntValueEnum, SignatureWriter, MinHashConfig};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::uf::{UnionFind};
 
 
-
-
+pub mod uf;
 pub mod s3;
 pub mod io;
 pub mod storage;
@@ -98,6 +98,9 @@ NOTE:
 struct ArgParser {
     #[clap(subcommand)]
     command: Commands,
+
+    #[arg(long, default_value_t=0)]
+    threads: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -200,13 +203,31 @@ enum Commands {
         #[arg(required=true, long)]
         config: PathBuf,
 
-        /// where the StorageConfig lives
+        /// where the stored hashes live
         #[arg(required=true, long)]
         sig_storage: PathBuf,
 
         /// Where the output files go 
         #[arg(required=true, long)]
         output: PathBuf,        
+
+    },
+
+    SaveUF {
+        // Gets a mapping from (path_id, line_num) -> hash
+        // Where the hash identifies the connected component
+
+        /// Path name of the config file
+        #[arg(required=true, long)]
+        config: PathBuf,
+
+        /// Where the stored hashes live
+        #[arg(required=true, long)]
+        sig_storage: PathBuf,
+
+        /// Where the output files go 
+        #[arg(required=true, long)]
+        output: PathBuf,
 
     }
 
@@ -393,7 +414,6 @@ fn aggregate_lines_to_kill(config: &MinHashConfig, sig_storage: &PathBuf) ->
             stored_files.entry(key).or_default().push(p.clone());
         });
 
-    println!("STORED FILES {:?}", stored_files);
     let lines_to_kill : DashMap<usize, DashSet<usize>> = DashMap::new();
     let lines_to_kill_pbar = build_pbar(stored_files.len(), "File groups");
     stored_files.par_iter()
@@ -425,6 +445,7 @@ fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths:
                           sig_size: usize, path_size: usize, line_size: usize) -> Result<(), Error> {
 
     // Load all data and create mapping of {sig -> [(doc_id, line_num),...]}
+    let augment_builder_start = Instant::now();
     let entry_size = sig_size + path_size + line_size;
     let mut groups : HashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum)>> = HashMap::new();
     for path in paths {
@@ -436,6 +457,8 @@ fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths:
             groups.entry(sig).or_default().push((path_id, line_size));
         }
     }
+    println!("Loaded augment files in {:?} secs", augment_builder_start.elapsed().as_secs());
+
     // Q: Maybe sorting is faster here???
 
     // Then add all but the first (path, line) to the lines_to_kill list
@@ -448,6 +471,33 @@ fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths:
     Ok(())
 }
 
+/*=================================================================
+=                      UNION FIND HELPERS                         =
+=================================================================*/
+
+fn ltk_to_edges(lines_to_kill: DashMap<usize, DashSet<usize>>) -> Vec<((usize, usize), (usize, usize))> {
+    // Gathers edges into a list of pairs of (path_id, line_num) objects
+
+    let edges: Vec<((usize, usize), (usize, usize))> =  lines_to_kill
+        .par_iter()
+        .flat_map(|entry| {
+            let (key, valset) = (entry.key(), entry.value());
+            let mut sub_edges = Vec::new();
+            let mut iter = valset.into_iter();
+            if let Some(first) = iter.next() {
+                let mut prev = first;
+                for val in iter {
+                    let edge = ((*key, prev), (*key, val));
+                    sub_edges.push(edge);
+                    prev = val;
+                }
+            }
+            sub_edges
+    })
+    .collect();
+
+    edges
+}
 
 
 /*=================================================================
@@ -507,6 +557,9 @@ fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: O
     Ok((lines_seen, lines_removed))
 
 }
+
+
+
 
 /*=================================================================
 =                             Subcommands                         =
@@ -620,6 +673,37 @@ fn finish_dedup(config:&PathBuf, sig_storage: &PathBuf, output: &PathBuf) -> Res
     Ok(())    
 }
 
+fn save_uf(config: &PathBuf, sig_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+    println!("Building UF structure");
+    let start_main = Instant::now();
+    let config = MinHashConfig::load(config).unwrap();
+
+    // Gather lines to kill -> edges
+    let lines_to_kill = aggregate_lines_to_kill(&config, sig_storage).unwrap();
+    let edges = ltk_to_edges(lines_to_kill);
+
+    // For edge in edges, add to UF
+    let mut uf = UnionFind::new();
+    for (x,y) in edges { // Make threaded later!
+        uf.union(x, y);
+    }
+
+    // Then write cc's to a hashmap 
+    let mut cc2node : HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
+    let mut node2cc : HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+
+
+    (&mut uf.parent).iter()
+        .for_each(|(k, _)| { 
+            let root = (&uf).find(*k);
+            cc2node.entry(root).or_default().push(*k);
+            node2cc.insert(*k, root);
+        }
+    );
+
+    Ok(())
+}
+
 
 /*=================================================================
 =                                 MAIN                            =
@@ -627,6 +711,10 @@ fn finish_dedup(config:&PathBuf, sig_storage: &PathBuf, output: &PathBuf) -> Res
 
 fn main() {
     let args = ArgParser::parse();
+    let threads = args.threads;
+    if threads != 0 {
+        std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
+    }
 
     let result = match &args.command {
         Commands::MinHash {input, output, num_docs, max_lines_per_path, sig_storage, num_bands, band_size, ngram_size} => {
@@ -644,7 +732,13 @@ fn main() {
 
         Commands::Finish {config, sig_storage, output} => {
             finish_dedup(config, sig_storage, output)        
+        },
+
+        Commands::SaveUF {config, sig_storage, output} => {
+            save_uf(config, sig_storage, output)
         }
+
+
     };
     result.unwrap()
 }
