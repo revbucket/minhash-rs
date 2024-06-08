@@ -513,7 +513,7 @@ impl SignatureWriter {
 	pub fn get_filename(storage_loc: &PathBuf, band_id: u32, sig_chunk: usize, path_chunk: usize) -> PathBuf {
 		storage_loc.clone()
 			.join(format!("band_{:016}", band_id))
-			.join(format!("sigchunk{:08}_pathchunk{:08}.bin", sig_chunk, path_chunk))
+			.join(format!("sigchunk{:08}_pathchunk{:08}.sig.bin", sig_chunk, path_chunk))
 	}
 
 	pub fn get_input_output_filenames(&self, output_loc: &PathBuf, path_chunk: usize) -> Vec<(PathBuf, PathBuf)> {
@@ -544,3 +544,4 @@ impl SignatureWriter {
 		Ok(())
 	}
 }
+

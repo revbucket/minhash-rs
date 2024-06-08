@@ -1,5 +1,5 @@
 
-use std::collections::{VecDeque, HashMap};
+use std::collections::{VecDeque};
 use std::hash::{Hash, Hasher, DefaultHasher};
 use anyhow::{Result, Error, anyhow};
 use std::path::{PathBuf};
@@ -395,7 +395,7 @@ fn aggregate_lines_to_kill(config: &MinHashConfig, sig_storage: &PathBuf) ->
 
     let lines_to_kill : DashMap<usize, DashSet<usize>> = DashMap::new();
     let lines_to_kill_pbar = build_pbar(stored_files.len(), "File groups");
-    stored_files.par_iter()
+    stored_files.iter()
         .for_each(|v| {
             _augment_lines_to_kill(&lines_to_kill, &v, config.sig_size, config.path_size, config.line_size).unwrap();
             lines_to_kill_pbar.inc(1);
@@ -425,35 +425,21 @@ fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths:
     let aug_start = Instant::now();
     // Load all data and create mapping of {sig -> [(doc_id, line_num),...]}
     let entry_size = sig_size + path_size + line_size;
-    let groups : DashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum)>> = DashMap::new();
-
+    let cur_set : DashSet<IntValueEnum> = DashSet::new();
     paths.iter().for_each(|path| {
         let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
         contents.par_chunks(entry_size).for_each(|entry| {
             let sig = IntValueEnum::from_bytes(entry[..sig_size].to_vec(), sig_size);
             let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size);
-            let line_size = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size);
-            groups.entry(sig).or_default().push((path_id, line_size));
+            let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size);
+            let newly_inserted = cur_set.insert(sig);
+            if !newly_inserted {
+                lines_to_kill.entry(path_id.as_usize()).or_default().insert(line_id.as_usize());                
+            }
         });
     });
-
     println!("(Aug) Loaded path data into groups in {:?} secs", aug_start.elapsed().as_secs());
-    // Q: Maybe sorting is faster here???
-
-    // Then add all but the first (path, line) to the lines_to_kill list
-
-    groups.par_iter_mut()
-        .for_each(|mut entry| {
-            let value = entry.value_mut();
-            while value.len() > 1 {
-                let to_add = value.pop().unwrap();
-                lines_to_kill.entry(to_add.0.as_usize()).or_default().insert(to_add.1.as_usize());
-            }
-    });
-
-    println!("(Aug) Finished Augmenting part in {:?} secs", aug_start.elapsed().as_secs());
-    Ok(())
-
+    return Ok(());
 }
 
 
