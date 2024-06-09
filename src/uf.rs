@@ -11,6 +11,7 @@ Custom "threadsafe" union find structure.
 	- Union two nodes	
 */
 
+use std::path::PathBuf;
 use std::collections::HashMap;
 
 pub(crate) struct UnionFind {
@@ -66,4 +67,10 @@ impl UnionFind {
             }
         }
     }
+
+    pub fn get_ccs(&self) -> HashMap<(usize, usize), (usize, usize)> {
+        let ccs : HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+        ccs
+    }
+
 }

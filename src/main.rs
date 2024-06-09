@@ -1,4 +1,5 @@
 
+use serde::{Serialize, Deserialize};
 use std::collections::{VecDeque, HashMap};
 use std::hash::{Hash, Hasher, DefaultHasher};
 use anyhow::{Result, Error, anyhow};
@@ -21,7 +22,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::uf::{UnionFind};
-
+use bincode;
 
 pub mod uf;
 pub mod s3;
@@ -32,6 +33,8 @@ pub mod storage;
 
 const MERSENNE_PRIME: u64 = (1 << 61) - 1;
 const MAX_HASH: u64 = (1 << 32) - 1;
+const CC_CHUNK_SIZE: usize = 100 * 1024 * 1024; // 100 MB chunk size
+
 
 /*
 New plan:
@@ -213,22 +216,27 @@ enum Commands {
 
     },
 
-    SaveUF {
-        // Gets a mapping from (path_id, line_num) -> hash
-        // Where the hash identifies the connected component
-
-        /// Path name of the config file
+    BuildEdges {
         #[arg(required=true, long)]
         config: PathBuf,
 
-        /// Where the stored hashes live
         #[arg(required=true, long)]
         sig_storage: PathBuf,
 
-        /// Where the output files go 
         #[arg(required=true, long)]
-        output: PathBuf,
+        group_storage: PathBuf,
+    },
 
+
+    BuildUf {
+        // Gets a mapping from (path_id, line_num) -> cc_hash
+        // Where the hash identifies the connected component
+
+        #[arg(required=true, long)]
+        group_storage: PathBuf,
+
+        #[arg(required=true, long)]
+        output: PathBuf
     }
 
 }
@@ -406,17 +414,11 @@ fn aggregate_lines_to_kill(config: &MinHashConfig, sig_storage: &PathBuf) ->
     let start_main = Instant::now();
 
     // Gather all files in storage and group by (band, sigchunk)
-    let stored_files : DashMap<(u32, usize), Vec<PathBuf>> = DashMap::new();
-    let all_files = expand_dirs(vec![sig_storage.clone()], Some(vec![".bin"].as_slice())).unwrap();
-    all_files.par_iter()
-        .for_each(|p| {
-            let key = _extract_bandid_sigchunk(p).unwrap();
-            stored_files.entry(key).or_default().push(p.clone());
-        });
+    let band_sigs = _collect_band_sigs(sig_storage).unwrap();
 
     let lines_to_kill : DashMap<usize, DashSet<usize>> = DashMap::new();
-    let lines_to_kill_pbar = build_pbar(stored_files.len(), "File groups");
-    stored_files.par_iter()
+    let lines_to_kill_pbar = build_pbar(band_sigs.len(), "File groups");
+    band_sigs.par_iter()
         .for_each(|v| {
             _augment_lines_to_kill(&lines_to_kill, &v, config.sig_size, config.path_size, config.line_size).unwrap();
             lines_to_kill_pbar.inc(1);
@@ -427,6 +429,17 @@ fn aggregate_lines_to_kill(config: &MinHashConfig, sig_storage: &PathBuf) ->
     Ok(lines_to_kill)
 }
 
+
+fn _collect_band_sigs(sig_storage: &PathBuf) -> Result<DashMap<(u32, usize), Vec<PathBuf>>, Error> {
+    let band_sigs : DashMap<(u32, usize), Vec<PathBuf>> = DashMap::new();
+    let all_files = expand_dirs(vec![sig_storage.clone()], Some(vec![".bin"].as_slice())).unwrap();
+    all_files.par_iter()
+        .for_each(|p| {
+            let key = _extract_bandid_sigchunk(p).unwrap();
+            band_sigs.entry(key).or_default().push(p.clone());
+        });
+    Ok(band_sigs)
+}
     
 fn _extract_bandid_sigchunk(path: &PathBuf) -> Result<(u32, usize), Error> {
     let re = Regex::new(r"band_(\d+)/sigchunk(\d+)").unwrap();
@@ -440,65 +453,95 @@ fn _extract_bandid_sigchunk(path: &PathBuf) -> Result<(u32, usize), Error> {
     Err(anyhow!("Failed to extract band_id/sig_chunk!"))
 }
 
-
 fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths: &Vec<PathBuf>, 
                           sig_size: usize, path_size: usize, line_size: usize) -> Result<(), Error> {
-
+    let aug_start = Instant::now();
     // Load all data and create mapping of {sig -> [(doc_id, line_num),...]}
-    let augment_builder_start = Instant::now();
     let entry_size = sig_size + path_size + line_size;
-    let mut groups : HashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum)>> = HashMap::new();
-    for path in paths {
+    let cur_set : DashSet<IntValueEnum> = DashSet::new();
+    paths.iter().for_each(|path| {
         let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
-        for entry in contents.chunks(entry_size) {
+        contents.par_chunks(entry_size).for_each(|entry| {
             let sig = IntValueEnum::from_bytes(entry[..sig_size].to_vec(), sig_size);
             let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size);
-            let line_size = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size);
-            groups.entry(sig).or_default().push((path_id, line_size));
-        }
-    }
-    println!("Loaded augment files in {:?} secs", augment_builder_start.elapsed().as_secs());
-
-    // Q: Maybe sorting is faster here???
-
-    // Then add all but the first (path, line) to the lines_to_kill list
-    for value in groups.values_mut() {
-        while value.len() > 1 {
-            let entry = value.pop().unwrap();
-            lines_to_kill.entry(entry.0.as_usize()).or_default().insert(entry.1.as_usize());
-        }
-    }
-    Ok(())
+            let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size);
+            let newly_inserted = cur_set.insert(sig);
+            if !newly_inserted {
+                lines_to_kill.entry(path_id.as_usize()).or_default().insert(line_id.as_usize());                
+            }
+        });
+    });
+    //println!("(Aug) Loaded path data into groups in {:?} secs", aug_start.elapsed().as_secs());
+    return Ok(());
 }
 
 /*=================================================================
 =                      UNION FIND HELPERS                         =
 =================================================================*/
 
-fn ltk_to_edges(lines_to_kill: DashMap<usize, DashSet<usize>>) -> Vec<((usize, usize), (usize, usize))> {
-    // Gathers edges into a list of pairs of (path_id, line_num) objects
+#[derive(Serialize, Deserialize)]
+struct BandGroup(Vec<Vec<(usize, usize)>>);
 
-    let edges: Vec<((usize, usize), (usize, usize))> =  lines_to_kill
-        .par_iter()
-        .flat_map(|entry| {
-            let (key, valset) = (entry.key(), entry.value());
-            let mut sub_edges = Vec::new();
-            let mut iter = valset.into_iter();
-            if let Some(first) = iter.next() {
-                let mut prev = first;
-                for val in iter {
-                    let edge = ((*key, prev), (*key, val));
-                    sub_edges.push(edge);
-                    prev = val;
-                }
-            }
-            sub_edges
-    })
-    .collect();
 
-    edges
+fn build_band_group(band_sigs: Vec<PathBuf>, sig_size: usize, path_size: usize, line_size: usize) -> 
+    Result<Vec<Vec<(usize, usize)>>, Error> {
+    // For a group of files that contain signatures within the same band (and a sig chunk)
+    // Collects a list of (path_id: usize, line_id: usize) for each clique
+    // (reading each file is done in parallel, so nothing upstream should be par_iter'ed)
+
+    let entry_size = sig_size + path_size + line_size;
+    let group_map : DashMap<IntValueEnum, Vec<(usize, usize)>> = DashMap::new();
+
+
+    band_sigs.iter().for_each(|path| {
+        let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
+        contents.par_chunks(entry_size).for_each(|entry| {
+            let sig = IntValueEnum::from_bytes(entry[..sig_size].to_vec(), sig_size);
+            let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
+            let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();
+            group_map.entry(sig).or_default().push((path_id, line_id));
+        });
+    });
+    
+    let band_group: Vec<Vec<(usize, usize)>> = group_map
+        .into_par_iter()
+        .map(|(_, group)| group)
+        .filter(|value| value.len() >1)
+        .collect();
+
+    Ok(band_group)
 }
 
+fn save_band_group(band_group: Vec<Vec<(usize, usize)>>, output: &PathBuf, band_id: u32, sig_chunk: usize) 
+    -> Result<(), Error> {
+    let band_group_name = _get_band_group_name(output, band_id, sig_chunk);
+    let serialized: Vec<u8> = bincode::serialize(&BandGroup(band_group)).unwrap();
+    write_mem_to_pathbuf(&serialized, &band_group_name)
+}
+
+
+fn _get_band_group_name(band_group_storage: &PathBuf, band_id: u32, sig_chunk: usize) -> PathBuf {
+    band_group_storage.clone()
+        .join(format!("band_{:016}", band_id))
+        .join(format!("bandgroup{:08}.group.bin", sig_chunk))
+}
+
+fn add_band_group_to_uf(band_group: &PathBuf, uf: UnionFind) -> Result<UnionFind, Error> {
+    // Adds all groups in the band group to the unionfind
+
+    let serialized = read_pathbuf_to_mem(band_group).unwrap().into_inner().into_inner();
+    let band_group: Vec<Vec<(usize, usize)>> = bincode::deserialize(&serialized).unwrap();
+    
+    band_group
+        .into_par_iter()
+        .for_each(|mut group| {
+            let last = group.pop().unwrap();
+            while group.len() > 0 {
+                //uf.union(last, group.pop().unwrap());
+            }
+    });
+    Ok(uf)
+}
 
 /*=================================================================
 =                         WRITE OUTPUTS                           =
@@ -673,34 +716,55 @@ fn finish_dedup(config:&PathBuf, sig_storage: &PathBuf, output: &PathBuf) -> Res
     Ok(())    
 }
 
-fn save_uf(config: &PathBuf, sig_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
-    println!("Building UF structure");
+fn build_edges(config: &PathBuf, sig_storage: &PathBuf, group_storage: &PathBuf) -> Result<(), Error> {
+    println!("Building edges...");
     let start_main = Instant::now();
     let config = MinHashConfig::load(config).unwrap();
 
-    // Gather lines to kill -> edges
-    let lines_to_kill = aggregate_lines_to_kill(&config, sig_storage).unwrap();
-    let edges = ltk_to_edges(lines_to_kill);
+    let band_sigs = _collect_band_sigs(sig_storage).unwrap();
 
-    // For edge in edges, add to UF
+    let pbar = build_pbar(band_sigs.len(), "Band Groups");
+    band_sigs.into_par_iter()
+        .for_each(|(k, v)| {
+            let (band_id, sig_chunk) = k;
+            let band_group = build_band_group(v, config.sig_size, config.path_size, config.line_size).unwrap();
+            save_band_group(band_group, group_storage, band_id, sig_chunk).unwrap();
+            pbar.inc(1);
+        });
+    println!("-------------------------");
+    println!("Completed building all edges");
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    Ok(())
+}
+
+fn build_uf(band_group_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+    // Saves a {connected-component: [(doc_id, line_id)]} dict built from the band groups
+
+    println!("Building UnionFind...");
+    let start_main = Instant::now();
+
     let mut uf = UnionFind::new();
-    for (x,y) in edges { // Make threaded later!
-        uf.union(x, y);
-    }
+    let all_band_groups = expand_dirs(vec![band_group_storage.clone()], Some(vec![".sav"].as_slice())).unwrap();
+    all_band_groups.into_iter().for_each(|band_group| {
+        //uf = add_band_group_to_uf(&band_group, uf).unwrap();
+    });
+    println!("Built union find in {:?} secs", start_main.elapsed().as_secs());
 
-    // Then write cc's to a hashmap 
-    let mut cc2node : HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
-    let mut node2cc : HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+    let ccs = uf.get_ccs();
 
+    // Save the cc chunk (do this as a method in the UF?)
+    let serialized_ccs = bincode::serialize(&ccs).unwrap();
 
-    (&mut uf.parent).iter()
-        .for_each(|(k, _)| { 
-            let root = (&uf).find(*k);
-            cc2node.entry(root).or_default().push(*k);
-            node2cc.insert(*k, root);
-        }
-    );
+    serialized_ccs.par_chunks(CC_CHUNK_SIZE)
+        .enumerate()        
+        .for_each(|(idx, chunk)| {
+            let part_name = output.clone().join(format!("cc_part{:08}.cc.bin", idx));
+            write_mem_to_pathbuf(chunk, &part_name).unwrap();
+    });
 
+    println!("-------------------------");
+    println!("Completed building UnionFind");
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
     Ok(())
 }
 
@@ -734,10 +798,15 @@ fn main() {
             finish_dedup(config, sig_storage, output)        
         },
 
-        Commands::SaveUF {config, sig_storage, output} => {
-            save_uf(config, sig_storage, output)
+        Commands::BuildEdges {config, sig_storage, group_storage} => {
+            build_edges(config, sig_storage, group_storage)
         }
 
+        Commands::BuildUf {group_storage, output} => {
+            build_uf(group_storage, output)
+        }
+
+        _ => {Ok(())}
 
     };
     result.unwrap()
