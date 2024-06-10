@@ -515,7 +515,7 @@ fn build_band_group(band_sigs: Vec<PathBuf>, sig_size: usize, path_size: usize, 
 fn save_band_group(band_group: Vec<Vec<(usize, usize)>>, output: &PathBuf, band_id: u32, sig_chunk: usize) 
     -> Result<(), Error> {
     let band_group_name = _get_band_group_name(output, band_id, sig_chunk);
-    let serialized: Vec<u8> = bincode::serialize(&BandGroup(band_group)).unwrap();
+    let serialized: Vec<u8> = serde_json::to_vec(&band_group).unwrap();//::serialize(&BandGroup(band_group)).unwrap();
     write_mem_to_pathbuf(&serialized, &band_group_name)
 }
 
@@ -523,7 +523,7 @@ fn save_band_group(band_group: Vec<Vec<(usize, usize)>>, output: &PathBuf, band_
 fn _get_band_group_name(band_group_storage: &PathBuf, band_id: u32, sig_chunk: usize) -> PathBuf {
     band_group_storage.clone()
         .join(format!("band_{:016}", band_id))
-        .join(format!("bandgroup{:08}.group.bin", sig_chunk))
+        .join(format!("bandgroup{:08}.group.bin.gz", sig_chunk))
 }
 
 fn add_band_group_to_uf(band_group: &PathBuf, uf: UnionFind) -> Result<UnionFind, Error> {
