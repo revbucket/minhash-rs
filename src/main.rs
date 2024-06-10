@@ -724,7 +724,7 @@ fn build_edges(config: &PathBuf, sig_storage: &PathBuf, group_storage: &PathBuf)
     let band_sigs = _collect_band_sigs(sig_storage).unwrap();
 
     let pbar = build_pbar(band_sigs.len(), "Band Groups");
-    band_sigs.into_par_iter()
+    band_sigs.into_iter()
         .for_each(|(k, v)| {
             let (band_id, sig_chunk) = k;
             let band_group = build_band_group(v, config.sig_size, config.path_size, config.line_size).unwrap();
