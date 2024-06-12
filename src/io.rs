@@ -17,6 +17,7 @@ We will ONLY ever be concerned about files that have extensions of:
 Compression schemes will always be inferred from extension
 */
 
+use std::fs::create_dir_all;
 use std::fs::File;
 use crate::s3::{get_reader_from_s3, expand_s3_dir, write_cursor_to_s3};
 use anyhow::Error;
@@ -31,7 +32,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
-const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst"];
+const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst", ".json.gz"];
 
 /*======================================================================
 =                              Listing files                           =
@@ -175,6 +176,11 @@ pub(crate) fn write_mem_to_pathbuf(contents: &[u8], output_file: &PathBuf) -> Re
             }
         };
     } else {
+        if let Some(parent_dir) = output_file.parent() {
+            if !parent_dir.exists() {
+                create_dir_all(parent_dir).unwrap()
+             }
+        }        
         let mut file = File::create(output_file).expect(format!("Unable to create output file {:?}", output_file).as_str());
         file.write_all(&compressed_data).expect(format!("Unable to write to {:?}", output_file).as_str());
 
