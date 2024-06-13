@@ -258,7 +258,7 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
         let line_num = IntValueEnum::new(line_num, config.line_size);
         let line = line.unwrap();
         docs_hashed += 1;
-        let json: Value = serde_json::from_str(&line).unwrap();
+        let json: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num.as_usize()));
         let text = json["text"].as_str().unwrap();
         let tokens = preprocess_text(text, &tokenizer);
         let hash_vals = get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size);
