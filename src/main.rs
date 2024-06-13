@@ -24,11 +24,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::uf::{UnionFind};
 use bincode;
 
+use crate::uf_rush2::UFRush;
+
 pub mod uf;
 pub mod s3;
 pub mod io;
 pub mod storage;
-
+pub mod uf_rush2;
 
 
 const MERSENNE_PRIME: u64 = (1 << 61) - 1;
@@ -231,6 +233,8 @@ enum Commands {
     BuildUf {
         // Gets a mapping from (path_id, line_num) -> cc_hash
         // Where the hash identifies the connected component
+        #[arg(required=true, long)]
+        config: PathBuf,
 
         #[arg(required=true, long)]
         group_storage: PathBuf,
@@ -432,7 +436,7 @@ fn aggregate_lines_to_kill(config: &MinHashConfig, sig_storage: &PathBuf) ->
 
 fn _collect_band_sigs(sig_storage: &PathBuf) -> Result<DashMap<(u32, usize), Vec<PathBuf>>, Error> {
     let band_sigs : DashMap<(u32, usize), Vec<PathBuf>> = DashMap::new();
-    let all_files = expand_dirs(vec![sig_storage.clone()], Some(vec![".bin"].as_slice())).unwrap();
+    let all_files = expand_dirs(vec![sig_storage.clone()], Some(vec![".sig.bin"].as_slice())).unwrap();
     all_files.par_iter()
         .for_each(|p| {
             let key = _extract_bandid_sigchunk(p).unwrap();
@@ -526,21 +530,57 @@ fn _get_band_group_name(band_group_storage: &PathBuf, band_id: u32, sig_chunk: u
         .join(format!("bandgroup{:08}.group.bin.gz", sig_chunk))
 }
 
-fn add_band_group_to_uf(band_group: &PathBuf, uf: UnionFind) -> Result<UnionFind, Error> {
+fn add_band_group_to_uf(band_group: &PathBuf, uf: &UFRush, config: &MinHashConfig) -> Result<(), Error> {
     // Adds all groups in the band group to the unionfind
-
+    let line_size = config.line_size;
     let serialized = read_pathbuf_to_mem(band_group).unwrap().into_inner().into_inner();
-    let band_group: Vec<Vec<(usize, usize)>> = bincode::deserialize(&serialized).unwrap();
+
+    let band_group: Vec<Vec<(usize, usize)>> = serde_json::from_slice(&serialized).unwrap();
     
     band_group
         .into_par_iter()
         .for_each(|mut group| {
             let last = group.pop().unwrap();
+            let last_id = pair2docid(last, line_size);            
             while group.len() > 0 {
-                //uf.union(last, group.pop().unwrap());
+                let cur = group.pop().unwrap();
+                let cur_id = pair2docid(cur, line_size);
+                //println!("PAIR {:?} {:?}", last, cur);
+                //println!("IDS {:?} {:?}", last_id, cur_id);
+                uf.unite(last_id, cur_id);
             }
     });
-    Ok(uf)
+    Ok(())
+}
+
+fn build_ccs(uf: UFRush, line_size: usize) -> Vec<((usize,usize), usize)> {
+    let size = uf.nodes.len();
+
+    let keys: Vec<usize> = uf.nodes.iter().map(|entry| *entry.key()).collect();
+    println!("LEN KEYS IS {:?}", keys.len());
+    println!("LINE SIZE IS {line_size}");
+    let pbar = build_pbar(size, "Docs");
+    keys.into_par_iter()
+    .map(|key| {
+        pbar.inc(1);
+        (docid2pair(key, line_size), uf.find(key))
+    })
+    .collect()
+}
+
+
+fn pair2docid(pair: (usize, usize), line_size: usize) -> usize {
+    // Given a (path_id, line_id) pair, converts it into a single usize 
+    // (which is needed for UF rush)
+    let (path_id, line_id) = pair;
+    (path_id << (line_size * 8) ) + line_id
+}
+
+fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
+    // Inverse function of the pair2docid
+    let mask = (1 << (line_size * 8)) - 1;
+    (docid >> (line_size * 8), docid & mask)
+
 }
 
 /*=================================================================
@@ -737,20 +777,25 @@ fn build_edges(config: &PathBuf, sig_storage: &PathBuf, group_storage: &PathBuf)
     Ok(())
 }
 
-fn build_uf(band_group_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+fn build_uf(config: &PathBuf, band_group_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
     // Saves a {connected-component: [(doc_id, line_id)]} dict built from the band groups
 
     println!("Building UnionFind...");
     let start_main = Instant::now();
+    let config = MinHashConfig::load(config).unwrap();
 
-    let mut uf = UnionFind::new();
-    let all_band_groups = expand_dirs(vec![band_group_storage.clone()], Some(vec![".sav"].as_slice())).unwrap();
+
+    let uf = UFRush::new();
+    let all_band_groups = expand_dirs(vec![band_group_storage.clone()], Some(vec![".group.bin.gz"].as_slice())).unwrap();
     all_band_groups.into_iter().for_each(|band_group| {
-        //uf = add_band_group_to_uf(&band_group, uf).unwrap();
+        add_band_group_to_uf(&band_group, &uf, &config).unwrap();
     });
     println!("Built union find in {:?} secs", start_main.elapsed().as_secs());
 
-    let ccs = uf.get_ccs();
+    println!("Starting CC collection");
+    let cc_start = Instant::now();
+    let ccs: Vec<((usize,usize), usize)> = build_ccs(uf, config.line_size);
+    println!("Built ccs in {:?} secs", cc_start.elapsed().as_secs());
 
     // Save the cc chunk (do this as a method in the UF?)
     let serialized_ccs = bincode::serialize(&ccs).unwrap();
@@ -761,7 +806,6 @@ fn build_uf(band_group_storage: &PathBuf, output: &PathBuf) -> Result<(), Error>
             let part_name = output.clone().join(format!("cc_part{:08}.cc.bin", idx));
             write_mem_to_pathbuf(chunk, &part_name).unwrap();
     });
-
     println!("-------------------------");
     println!("Completed building UnionFind");
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
@@ -802,8 +846,8 @@ fn main() {
             build_edges(config, sig_storage, group_storage)
         }
 
-        Commands::BuildUf {group_storage, output} => {
-            build_uf(group_storage, output)
+        Commands::BuildUf {config, group_storage, output} => {
+            build_uf(config, group_storage, output)
         }
 
         _ => {Ok(())}
