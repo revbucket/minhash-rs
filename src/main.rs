@@ -538,7 +538,7 @@ fn add_band_group_to_uf(band_group: &PathBuf, uf: &UFRush, config: &MinHashConfi
     let band_group: Vec<Vec<(usize, usize)>> = serde_json::from_slice(&serialized).unwrap();
     
     band_group
-        .into_par_iter()
+        .into_iter()
         .for_each(|mut group| {
             let last = group.pop().unwrap();
             let last_id = pair2docid(last, line_size);            
@@ -789,7 +789,7 @@ fn build_uf(config: &PathBuf, band_group_storage: &PathBuf, output: &PathBuf) ->
 
     let all_band_groups = expand_dirs(vec![band_group_storage.clone()], Some(vec![".group.bin.gz"].as_slice())).unwrap();
     let pbar = build_pbar(all_band_groups.len(), "Band groups");
-    all_band_groups.into_iter().for_each(|band_group| {
+    all_band_groups.into_par_iter().for_each(|band_group| {
         add_band_group_to_uf(&band_group, &uf, &config).unwrap();
         pbar.inc(1);
     });
