@@ -499,7 +499,7 @@ fn build_band_group(band_sigs: Vec<PathBuf>, sig_size: usize, path_size: usize, 
 
     band_sigs.iter().for_each(|path| {
         let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
-        contents.par_chunks(entry_size).for_each(|entry| {
+        contents.chunks(entry_size).for_each(|entry| {
             let sig = IntValueEnum::from_bytes(entry[..sig_size].to_vec(), sig_size);
             let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
             let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();
@@ -508,7 +508,7 @@ fn build_band_group(band_sigs: Vec<PathBuf>, sig_size: usize, path_size: usize, 
     });
     
     let band_group: Vec<Vec<(usize, usize)>> = group_map
-        .into_par_iter()
+        .into_iter()
         .map(|(_, group)| group)
         .filter(|value| value.len() >1)
         .collect();
@@ -764,7 +764,7 @@ fn build_edges(config: &PathBuf, sig_storage: &PathBuf, group_storage: &PathBuf)
     let band_sigs = _collect_band_sigs(sig_storage).unwrap();
 
     let pbar = build_pbar(band_sigs.len(), "Band Groups");
-    band_sigs.into_iter()
+    band_sigs.into_par_iter()
         .for_each(|(k, v)| {
             let (band_id, sig_chunk) = k;
             let band_group = build_band_group(v, config.sig_size, config.path_size, config.line_size).unwrap();
