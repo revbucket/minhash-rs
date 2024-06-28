@@ -1,4 +1,6 @@
 // General tools for interfacing with s3
+use tokio::io::AsyncRead;
+use anyhow::Error;
 use std::path::{PathBuf, Path};
 use anyhow::{Result};
 
@@ -135,31 +137,38 @@ async fn get_object_with_retry(bucket: &str, key: &str, num_retries: usize) -> R
 
 
 
-pub(crate) async fn get_reader_from_s3<P: AsRef<Path>>(path: P, num_retries: Option<usize>) -> Result<BufReader<Cursor<Vec<u8>>>, S3Error>{
+pub(crate) async fn get_reader_from_s3<P: AsRef<Path>>(path: P, num_retries: Option<usize>) -> Result<BufReader<Cursor<Vec<u8>>>, Error>{
     // Gets all the data from an S3 file and loads it into memory and returns a Bufreader over it
     let (s3_bucket, s3_key) = split_s3_path(&path);
     let object_body = get_object_with_retry(&s3_bucket, &s3_key, num_retries.unwrap_or(5)).await?;
     let body_stream = object_body.into_async_read();
+
+    let buffer_size = 4 * 1024 * 1024; // Buffer size of 4MB by default 
     let mut data = Vec::new();
-
-    if (path.as_ref().extension().unwrap() == "zstd") || (path.as_ref().extension().unwrap() == "zst") {
-        let zstd = asyncZstd::new(body_stream);
-        let mut reader = tBufReader::with_capacity(1024 * 1024, zstd);
-        reader.read_to_end(&mut data).await.expect("Failed to read data {:path}");
-
-    } else if path.as_ref().extension().unwrap() == "gz" {
-        let gz = asyncGZ::new(body_stream);
-        let mut reader = tBufReader::with_capacity(1024 * 1024, gz);
-        reader.read_to_end(&mut data).await.expect("Failed to read data {:path}");        
-    } else {
-        let mut reader = tBufReader::with_capacity(1024 * 1024, body_stream);
-        reader.read_to_end(&mut data).await.expect("Failed to read data {:path}");
+    let mut reader = match path.as_ref().extension().and_then(|ext| ext.to_str()) {
+        Some("zstd") | Some("zst") => {
+            Box::new(asyncZstd::new(body_stream)) as Box<dyn AsyncRead + Unpin>
+        }
+        Some("gz") => {
+            Box::new(asyncGZ::new(body_stream)) as Box<dyn AsyncRead + Unpin>
+        }
+        _ => Box::new(body_stream) as Box<dyn AsyncRead + Unpin>,
     };
 
+    let mut buffer = vec![0; buffer_size];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(n) => data.extend_from_slice(&buffer[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into())
+        }
+    }
     let cursor = Cursor::new(data);
 
     Ok(BufReader::new(cursor))
 }
+
 
 
 

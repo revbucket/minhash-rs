@@ -31,6 +31,7 @@ use std::io::{BufReader, Cursor, Write, Read};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use zstd::stream::write::Encoder as ZstdEncoder;
+use rayon::prelude::*;
 
 const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst"];
 

@@ -556,7 +556,7 @@ fn add_band_group_to_uf(band_group: &PathBuf, uf: &UFRush, config: &MinHashConfi
 fn build_ccs(uf: UFRush, line_size: usize) -> Vec<((usize,usize), usize)> {
     let size = uf.nodes.len();
 
-    let keys: Vec<usize> = uf.nodes.iter().map(|entry| *entry.key()).collect();
+    let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
     println!("LEN KEYS IS {:?}", keys.len());
     println!("LINE SIZE IS {line_size}");
     let pbar = build_pbar(size, "Docs");
