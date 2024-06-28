@@ -1,4 +1,5 @@
 // General tools for interfacing with s3
+use std::io::Read;
 use tokio::io::AsyncRead;
 use anyhow::Error;
 use std::path::{PathBuf, Path};
@@ -16,6 +17,8 @@ use rand::{Rng};
 use tokio::io::AsyncReadExt;
 use tokio::io::BufReader as tBufReader;
 use tokio::time::{Duration, sleep};
+use flate2::read::MultiGzDecoder;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 
 /*==========================================================
@@ -141,30 +144,25 @@ pub(crate) async fn get_reader_from_s3<P: AsRef<Path>>(path: P, num_retries: Opt
     // Gets all the data from an S3 file and loads it into memory and returns a Bufreader over it
     let (s3_bucket, s3_key) = split_s3_path(&path);
     let object_body = get_object_with_retry(&s3_bucket, &s3_key, num_retries.unwrap_or(5)).await?;
-    let body_stream = object_body.into_async_read();
 
-    let buffer_size = 4 * 1024 * 1024; // Buffer size of 4MB by default 
-    let mut data = Vec::new();
-    let mut reader = match path.as_ref().extension().and_then(|ext| ext.to_str()) {
-        Some("zstd") | Some("zst") => {
-            Box::new(asyncZstd::new(body_stream)) as Box<dyn AsyncRead + Unpin>
-        }
+    let data = object_body.collect().await?;
+    let data = data.into_bytes();
+
+    let mut decompressed = Vec::new();
+    match path.as_ref().extension().and_then(|ext| ext.to_str()) {
         Some("gz") => {
-            Box::new(asyncGZ::new(body_stream)) as Box<dyn AsyncRead + Unpin>
+            let mut decoder = MultiGzDecoder::new(data.as_ref());
+            decoder.read_to_end(&mut decompressed).unwrap();
         }
-        _ => Box::new(body_stream) as Box<dyn AsyncRead + Unpin>,
+        Some("zstd") | Some("zst") => {
+            let mut decoder = ZstdDecoder::new(data.as_ref()).unwrap();
+            decoder.read_to_end(&mut decompressed).unwrap();
+        }
+        _ => {decompressed = data.to_vec()}
     };
 
-    let mut buffer = vec![0; buffer_size];
-    loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) => break,
-            Ok(n) => data.extend_from_slice(&buffer[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.into())
-        }
-    }
-    let cursor = Cursor::new(data);
+
+    let cursor = Cursor::new(decompressed);
 
     Ok(BufReader::new(cursor))
 }
