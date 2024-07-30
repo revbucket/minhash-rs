@@ -21,7 +21,6 @@ use crate::storage::{IntValueEnum, SignatureWriter, MinHashConfig};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::uf::{UnionFind};
 use bincode;
 
 use crate::uf_rush2::UFRush;
@@ -240,7 +239,11 @@ enum Commands {
         group_storage: PathBuf,
 
         #[arg(required=true, long)]
-        output: PathBuf
+        output: PathBuf,
+
+        /// If true, we instead also save the size of each cc
+        #[arg(long, default_value_t=false)]
+        cc_sizes: bool
     }
 
 }
@@ -583,6 +586,35 @@ fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
 
 }
 
+fn count_cc_sizes(ccs: Vec<((usize, usize), usize)>) -> HashMap<usize, usize> {
+    // First map only the cc hashes into a dashmap counting them 
+    let ccid2count : DashMap<usize, usize> = DashMap::new();
+    let cc_counter_pbar = build_pbar(ccs.len(), "Docs");
+
+    ccs.par_iter()
+        .for_each(|(_, cc_id)| {
+            ccid2count.entry(*cc_id).and_modify(|e| *e += 1).or_insert(1);
+            cc_counter_pbar.inc(1);
+        });
+
+    // Then map values into a second dashmap counting sizes 
+    let cc_sizes_dashmap: DashMap<usize, usize> = DashMap::new();
+    let cc_sizes_pbar = build_pbar(cc_sizes_dashmap.len(), "CCS");
+    ccid2count.par_iter().for_each(|entry| {
+        let cc_size = *entry.value();
+        cc_sizes_dashmap.entry(cc_size).and_modify(|e| *e +=1).or_insert(1);
+        cc_sizes_pbar.inc(1);
+    });
+
+    // Then return a hashmap of these things:
+    let cc_sizes : HashMap<usize, usize> = cc_sizes_dashmap
+        .into_iter()
+        .map(|(k, v)| (k,v)).collect();
+    cc_sizes
+}
+
+
+
 /*=================================================================
 =                         WRITE OUTPUTS                           =
 =================================================================*/
@@ -777,7 +809,7 @@ fn build_edges(config: &PathBuf, sig_storage: &PathBuf, group_storage: &PathBuf)
     Ok(())
 }
 
-fn build_uf(config: &PathBuf, band_group_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+fn build_uf(config: &PathBuf, band_group_storage: &PathBuf, output: &PathBuf, cc_sizes: bool) -> Result<(), Error> {
     // Saves a {connected-component: [(doc_id, line_id)]} dict built from the band groups
 
     println!("Building UnionFind...");
@@ -809,6 +841,16 @@ fn build_uf(config: &PathBuf, band_group_storage: &PathBuf, output: &PathBuf) ->
             let part_name = output.clone().join(format!("cc_part{:08}.cc.bin", idx));
             write_mem_to_pathbuf(chunk, &part_name).unwrap();
     });
+
+    if cc_sizes {
+        println!("Starting CC Size collection");
+        let cc_size_map = count_cc_sizes(ccs);
+        let mut cc_size_json = Vec::new();
+        serde_json::to_writer(&mut cc_size_json, &cc_size_map).unwrap();
+        let size_filename = output.clone().join("cc_sizes.json.gz");
+        write_mem_to_pathbuf(&cc_size_json, &size_filename).unwrap()
+    }
+
     println!("-------------------------");
     println!("Completed building UnionFind");
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
@@ -849,8 +891,8 @@ fn main() {
             build_edges(config, sig_storage, group_storage)
         }
 
-        Commands::BuildUf {config, group_storage, output} => {
-            build_uf(config, group_storage, output)
+        Commands::BuildUf {config, group_storage, output, cc_sizes} => {
+            build_uf(config, group_storage, output, *cc_sizes)
         }
 
         _ => {Ok(())}
