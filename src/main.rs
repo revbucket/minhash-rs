@@ -1,4 +1,5 @@
 
+use std::sync::Mutex;
 use serde::{Serialize, Deserialize};
 use std::collections::{VecDeque, HashMap};
 use std::hash::{Hash, Hasher, DefaultHasher};
@@ -244,6 +245,27 @@ enum Commands {
         /// If true, we instead also save the size of each cc
         #[arg(long, default_value_t=false)]
         cc_sizes: bool
+    },
+
+
+    UfSizePrune {
+        // Prunes a dataset based on the connected component sizes:
+        #[arg(required=true, long)]
+        config: PathBuf, 
+
+        #[arg(required=true, long)]
+        ccs: PathBuf,
+
+        #[arg(required=true, long)]
+        output: PathBuf,
+
+        /// Removes all documents that belong to a cc that has size <= than this
+        #[arg(required=true, long)]
+        floor: usize,
+
+        /// Of the ccs with size > floor, only keeps this many of the ccs
+        #[arg(required=true, long)]
+        ceil:usize
     }
 
 }
@@ -615,6 +637,123 @@ fn count_cc_sizes(ccs: Vec<((usize, usize), usize)>) -> HashMap<usize, usize> {
 
 
 
+
+
+
+/*=================================================================
+=                         UF SIZE PRUNE HELPERS                   =
+=================================================================*/
+
+fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error> {
+    // Takes the CC directory and gathers all the files, loads them and then groups objects
+    // according to which CC they belong to 
+    let cc_ext = ".cc.bin";
+    let mut cc_paths = expand_dirs(vec![cc_dir.clone()], Some(&[&cc_ext])).unwrap();
+    cc_paths.sort();
+
+    // Read the chunks into memory 
+    let data_read_pbar = build_pbar(cc_paths.len(), "CC Chunks (loading)");
+    let cc_chunks: Vec<Vec<u8>> = cc_paths.par_iter().map(|p| {
+        let chunk_contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
+        data_read_pbar.inc(1);
+        chunk_contents
+    }).collect();
+
+    // Quickly concatenate and deserialize all the chunks 
+    let mut offsets = Vec::with_capacity(cc_chunks.len());
+    let mut current_offset = 0;
+    for chunk in &cc_chunks {
+        offsets.push(current_offset);
+        current_offset += chunk.len()
+    }
+    let total_len = offsets.last().unwrap();
+    let cc_bytes = Mutex::new(Vec::with_capacity(*total_len));
+    let cc_cat = build_pbar(cc_chunks.len(), "CC Chunks (concat)");
+
+    cc_chunks.par_iter().zip(offsets.par_iter()).for_each(|(chunk, &offset)| {
+        let mut local_result = vec![0; chunk.len()];
+        local_result.copy_from_slice(chunk);
+        let mut cc_bytes = cc_bytes.lock().unwrap();
+        cc_bytes.resize(offset + chunk.len(), 0);
+        cc_bytes[offset..offset + chunk.len()].copy_from_slice(&local_result);
+        cc_cat.inc(1);
+    });
+    let ccs = bincode::deserialize(&cc_bytes.into_inner().unwrap()).unwrap();
+    Ok(ccs)
+}  
+
+
+fn group_docs_by_cc(cc: &Vec<((usize, usize), usize)>) -> DashMap<usize, Vec<(usize, usize)>> {
+    let cc_group: DashMap<usize, Vec<(usize, usize)>> = DashMap::new();
+
+    let cc_pbar = build_pbar(cc.len(), "Docs");
+    cc.into_par_iter()
+        .for_each(|((doc_id, line_num), cc_id)| {
+            cc_group.entry(*cc_id).or_default().push((*doc_id, *line_num));
+            cc_pbar.inc(1);
+        }
+    );
+    cc_group
+}
+
+fn gather_lines_to_live(cc_groups: DashMap<usize, Vec<(usize, usize)>>, floor: usize, ceil: usize) -> DashMap<usize, DashSet<usize>> {
+    // Gathers a collection of (doc_id, line_num) that SURVIVE given the floor and ceil
+    let survivor_pbar = build_pbar(cc_groups.len(), "CCs");
+    let survivors : Vec<(usize, usize)> = cc_groups
+        .into_par_iter()
+        .flat_map(|(k, val)| {
+            let survivors: Vec<(usize, usize)> = if val.len() <= floor {
+                // If cc is <= floor, keep nothing
+                Vec::new()
+            } else if val.len() <= ceil {
+                // If cc is > floor but <= ceil, keep everything
+                val
+            } else {
+                // otherwise randomly select ceil to keep
+                let mut rng = thread_rng();
+                val.choose_multiple(&mut rng, ceil).cloned().collect()
+            };
+            survivor_pbar.inc(1);
+            survivors
+        }).collect();
+
+    // And then group by doc id
+    let grouped_survivors : DashMap<usize, DashSet<usize>> = DashMap::new();
+    let group_pbar = build_pbar(survivors.len(), "Survivors");
+    survivors.into_par_iter()
+        .for_each(|(doc_id, line_num)| {
+            grouped_survivors.entry(doc_id).or_default().insert(line_num);
+            group_pbar.inc(1);
+        });
+    grouped_survivors
+}
+
+fn gather_lines_to_kill_ccs(cc_groups: DashMap<usize, Vec<(usize, usize)>>, floor:usize, ceil:usize) -> 
+    DashMap<usize, DashSet<usize>> 
+{
+    // Gathers a collection of (doc_id, line_num) that should get REMOVED, given the ceil
+    assert!(floor == 0);
+    let ltk_pbar = build_pbar(cc_groups.len(), "CCs");
+    let grouped_ltk : DashMap<usize, DashSet<usize>> = DashMap::new();
+    cc_groups
+        .into_par_iter()
+        .for_each(|(_, v)| {
+            let ltk: Vec<(usize, usize)> = if v.len() < ceil {
+                v
+            } else {
+                let mut rng = thread_rng();
+                v.choose_multiple(&mut rng, v.len() - ceil).cloned().collect::<Vec<(usize, usize)>>()
+            };
+            for (doc_id, line_num) in ltk {
+                grouped_ltk.entry(doc_id).or_default().insert(line_num);
+            }
+            ltk_pbar.inc(1);
+        }
+    );
+    grouped_ltk
+}
+
+
 /*=================================================================
 =                         WRITE OUTPUTS                           =
 =================================================================*/
@@ -673,6 +812,47 @@ fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: O
 
 }
 
+fn scrub_lines_survivors(config: &MinHashConfig, lines_to_survive: DashMap<usize, DashSet<usize>>, 
+                         output_directory: &PathBuf) -> (usize, usize) {
+    let documents_seen = AtomicUsize::new(0);
+    let documents_removed = AtomicUsize::new(0);
+    let pbar = build_pbar(lines_to_survive.len(), "Paths");
+    config.indices.par_iter().for_each(|(path, idx)| {
+        if lines_to_survive.contains_key(idx) {
+            let output_filename = get_output_filename(&config.input, path, output_directory)            ;
+            let survivors = lines_to_survive.get(idx).map(|v| v.value().clone()).unwrap();
+            let (path_seen, path_removed) = keep_survivors(path, &output_filename, survivors).unwrap();
+            documents_seen.fetch_add(path_seen, Ordering::SeqCst);
+            documents_removed.fetch_add(path_removed, Ordering::SeqCst);
+        }
+        pbar.inc(1);
+    });
+    (documents_seen.into_inner(), documents_removed.into_inner())
+}
+
+fn keep_survivors(input_filename: &PathBuf, output_filename: &PathBuf, survivors: DashSet<usize>) -> Result<(usize, usize), Error> {
+    let data = read_pathbuf_to_mem(input_filename).unwrap();
+    let mut lines_seen = 0;
+    let mut lines_removed = 0;
+    let mut output_bytes = Vec::new();
+    let mut line_num = 0;
+    for line in data.lines() {
+        let line = line?;
+        lines_seen += 1;
+        if survivors.contains(&line_num) {
+            output_bytes.extend(line.as_bytes());
+            output_bytes.push(b'\n');            
+        } else {
+            lines_removed += 1;
+        }
+        line_num += 1;
+    }
+    if output_bytes.len() == 0 {
+        return Ok((lines_seen, lines_removed))
+    }
+    write_mem_to_pathbuf(&output_bytes, output_filename).unwrap();
+    Ok((lines_seen, lines_removed))
+}
 
 
 
@@ -857,6 +1037,46 @@ fn build_uf(config: &PathBuf, band_group_storage: &PathBuf, output: &PathBuf, cc
     Ok(())
 }
 
+fn uf_size_prune(config: &PathBuf, ccs: &PathBuf, output: &PathBuf, floor: usize, ceil:usize) -> Result<(), Error> {
+    println!("Starting UF-based pruning...");
+    let start_main = Instant::now();
+    let config = MinHashConfig::load(config).unwrap();
+
+    println!("Loading CCS...");
+    let start_load_cc = Instant::now();
+    let loaded_ccs = load_cc_list(ccs).unwrap();
+    println!("Loaded CCs in {:?} (s)", start_load_cc.elapsed().as_secs());
+
+    println!("Grouping docs by CC...");
+    let start_group_cc = Instant::now();
+    let groups = group_docs_by_cc(&loaded_ccs);
+    println!("Grouped CCs in {:?} (s)", start_group_cc.elapsed().as_secs());
+
+
+    // Now we have to do some awkward branching:
+    // If floor > 1, can just collect docs to KEEP
+    println!("Starting scrub of dataset...");
+    let start_scrub = Instant::now();
+    let (documents_seen, documents_removed) = if floor == 0 {
+        let grouped_survivors = gather_lines_to_live(groups, floor, ceil);
+        scrub_lines_survivors(&config, grouped_survivors, output)
+    } else {
+        let grouped_ltk = gather_lines_to_kill_ccs(groups, floor, ceil);
+        scrub_all_paths(&config, grouped_ltk, output)
+    };
+    println!("Finished scrubbing dataset in {:?} (s)", start_scrub.elapsed().as_secs());
+
+    println!("-------------------------");
+    println!("Completing minhash run");
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    println!("Saw {:?} documents", documents_seen);
+    println!("Removed {:?} documents", documents_removed);
+    println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
+
+    Ok(())  
+}
+
+
 
 /*=================================================================
 =                                 MAIN                            =
@@ -889,10 +1109,14 @@ fn main() {
 
         Commands::BuildEdges {config, sig_storage, group_storage} => {
             build_edges(config, sig_storage, group_storage)
-        }
+        },
 
         Commands::BuildUf {config, group_storage, output, cc_sizes} => {
             build_uf(config, group_storage, output, *cc_sizes)
+        },
+
+        Commands::UfSizePrune {config, ccs, output, floor, ceil} => {
+            uf_size_prune(config, ccs, output, *floor, *ceil)
         }
 
         _ => {Ok(())}
