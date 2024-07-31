@@ -658,7 +658,6 @@ fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error>
     let cc_ext = ".cc.bin";
     let mut cc_paths = expand_dirs(vec![cc_dir.clone()], Some(&[&cc_ext])).unwrap();
     cc_paths.sort();
-    println!("CC CHUNKS : {:?}", cc_paths);
     
     // Read the chunks into memory 
     let data_read_pbar = build_pbar(cc_paths.len(), "CC Chunks (loading)");
