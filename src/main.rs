@@ -658,7 +658,8 @@ fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error>
     let cc_ext = ".cc.bin";
     let mut cc_paths = expand_dirs(vec![cc_dir.clone()], Some(&[&cc_ext])).unwrap();
     cc_paths.sort();
-
+    println!("CC CHUNKS : {:?}", cc_paths);
+    
     // Read the chunks into memory 
     let data_read_pbar = build_pbar(cc_paths.len(), "CC Chunks (loading)");
     let cc_chunks: Vec<Vec<u8>> = cc_paths.par_iter().map(|p| {
@@ -667,26 +668,14 @@ fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error>
         chunk_contents
     }).collect();
 
-    // Quickly concatenate and deserialize all the chunks 
-    let mut offsets = Vec::with_capacity(cc_chunks.len());
-    let mut current_offset = 0;
-    for chunk in &cc_chunks {
-        offsets.push(current_offset);
-        current_offset += chunk.len()
+    let mut cc_bytes = Vec::new();
+    let cat_pbar = build_pbar(cc_chunks.len(), "CC Chunks (concat2)");
+    for chunk in cc_chunks {
+        cc_bytes.extend(chunk);
+        cat_pbar.inc(1);
     }
-    let total_len = offsets.last().unwrap();
-    let cc_bytes = Mutex::new(Vec::with_capacity(*total_len));
-    let cc_cat = build_pbar(cc_chunks.len(), "CC Chunks (concat)");
 
-    cc_chunks.par_iter().zip(offsets.par_iter()).for_each(|(chunk, &offset)| {
-        let mut local_result = vec![0; chunk.len()];
-        local_result.copy_from_slice(chunk);
-        let mut cc_bytes = cc_bytes.lock().unwrap();
-        cc_bytes.resize(offset + chunk.len(), 0);
-        cc_bytes[offset..offset + chunk.len()].copy_from_slice(&local_result);
-        cc_cat.inc(1);
-    });
-    let ccs = bincode::deserialize(&cc_bytes.into_inner().unwrap()).unwrap();
+    let ccs = bincode::deserialize(&cc_bytes).unwrap();
     Ok(ccs)
 }  
 
@@ -709,7 +698,7 @@ fn gather_lines_to_live(cc_groups: DashMap<usize, Vec<(usize, usize)>>, floor: u
     let survivor_pbar = build_pbar(cc_groups.len(), "CCs");
     let survivors : Vec<(usize, usize)> = cc_groups
         .into_par_iter()
-        .flat_map(|(k, val)| {
+        .flat_map(|(_, val)| {
             let survivors: Vec<(usize, usize)> = if val.len() <= floor {
                 // If cc is <= floor, keep nothing
                 Vec::new()
