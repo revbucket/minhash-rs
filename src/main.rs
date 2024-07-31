@@ -35,7 +35,7 @@ pub mod uf_rush2;
 
 const MERSENNE_PRIME: u64 = (1 << 61) - 1;
 const MAX_HASH: u64 = (1 << 32) - 1;
-const CC_CHUNK_SIZE: usize = 100 * 1024 * 1024; // 100 MB chunk size
+const CC_CHUNK_SIZE: usize = usize::MAX; //100 * 1024 * 1024; // 100 MB chunk size
 
 
 /*
