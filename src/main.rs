@@ -266,6 +266,14 @@ enum Commands {
         /// Of the ccs with size > floor, only keeps this many of the ccs
         #[arg(required=true, long)]
         ceil:usize
+    },
+
+    CountDocsFromSigs {
+        #[arg(required=true, long)]
+        config: PathBuf,
+
+        #[arg(required=true, long)]
+        sig_storage: PathBuf,
     }
 
 }
@@ -1076,6 +1084,39 @@ fn uf_size_prune(config: &PathBuf, ccs: &PathBuf, output: &PathBuf, floor: usize
     Ok(())  
 }
 
+fn count_docs_from_sigs(config: &PathBuf, sig_storage: &PathBuf) -> Result<(), Error> {
+    println!("Starting counting of docs from sigs");
+    let start_main = Instant::now();
+    let config = MinHashConfig::load(config).unwrap();
+
+    let band_sigs = _collect_band_sigs(sig_storage).unwrap();
+    let sig_files: Vec<PathBuf> = band_sigs.into_iter()
+        .flat_map(|(_,v)| v)
+        .collect();
+    let counter: DashSet<(usize, usize)> = DashSet::new();
+    let pbar = build_pbar(sig_files.len(), "Sig Files");
+    let sig_size = config.sig_size;
+    let path_size = config.path_size;
+    let line_size = config.line_size;
+    sig_files.into_par_iter()
+        .for_each(|p| {
+            let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
+            contents.chunks(sig_size + path_size + line_size)
+                .for_each(|entry| {
+                let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
+                let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();                
+                counter.insert((path_id, line_id));
+            });
+            pbar.inc(1);
+        });
+
+    println!("-------------------------");
+    println!("Completed counting docs from sigs");
+    println!("Number of docs is {:?}", counter.len());
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    Ok(())
+
+}
 
 
 /*=================================================================
@@ -1117,6 +1158,10 @@ fn main() {
 
         Commands::UfSizePrune {config, ccs, output, floor, ceil} => {
             uf_size_prune(config, ccs, output, *floor, *ceil)
+        },
+
+        Commands::CountDocsFromSigs {config, sig_storage} => {
+            count_docs_from_sigs(config, sig_storage)
         }
 
         _ => {Ok(())}
