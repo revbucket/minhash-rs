@@ -26,7 +26,6 @@ use bincode;
 
 use crate::uf_rush2::UFRush;
 
-pub mod uf;
 pub mod s3;
 pub mod io;
 pub mod storage;
