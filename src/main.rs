@@ -34,7 +34,7 @@ pub mod uf_rush2;
 
 const MERSENNE_PRIME: u64 = (1 << 61) - 1;
 const MAX_HASH: u64 = (1 << 32) - 1;
-const CC_CHUNK_SIZE: usize = 100 * 1024 * 1024; // 100 MB chunk size
+const CC_CHUNK_SIZE: usize = usize::MAX; //100 * 1024 * 1024; // 100 MB chunk size
 
 
 /*
@@ -269,15 +269,21 @@ enum Commands {
 
     AnnotateCc {
         // Annotates each document with their CC size 
+
+        #[arg(required=true, long)]
+        config: PathBuf,    
+        #[arg(required=true, long)]
+        ccs: PathBuf, 
+        #[arg(required=true, long)]
+        output: PathBuf,      
+    },             
+
+    CountDocsFromSigs {
         #[arg(required=true, long)]
         config: PathBuf,
 
         #[arg(required=true, long)]
-        ccs: PathBuf,
-
-        #[arg(required=true, long)]
-        output: PathBuf,
-
+        sig_storage: PathBuf,
     }
 
 }
@@ -662,7 +668,7 @@ fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error>
     let cc_ext = ".cc.bin";
     let mut cc_paths = expand_dirs(vec![cc_dir.clone()], Some(&[&cc_ext])).unwrap();
     cc_paths.sort();
-
+    
     // Read the chunks into memory 
     let data_read_pbar = build_pbar(cc_paths.len(), "CC Chunks (loading)");
     let cc_chunks: Vec<Vec<u8>> = cc_paths.par_iter().map(|p| {
@@ -671,26 +677,14 @@ fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error>
         chunk_contents
     }).collect();
 
-    // Quickly concatenate and deserialize all the chunks 
-    let mut offsets = Vec::with_capacity(cc_chunks.len());
-    let mut current_offset = 0;
-    for chunk in &cc_chunks {
-        offsets.push(current_offset);
-        current_offset += chunk.len()
+    let mut cc_bytes = Vec::new();
+    let cat_pbar = build_pbar(cc_chunks.len(), "CC Chunks (concat2)");
+    for chunk in cc_chunks {
+        cc_bytes.extend(chunk);
+        cat_pbar.inc(1);
     }
-    let total_len = offsets.last().unwrap();
-    let cc_bytes = Mutex::new(Vec::with_capacity(*total_len));
-    let cc_cat = build_pbar(cc_chunks.len(), "CC Chunks (concat)");
 
-    cc_chunks.par_iter().zip(offsets.par_iter()).for_each(|(chunk, &offset)| {
-        let mut local_result = vec![0; chunk.len()];
-        local_result.copy_from_slice(chunk);
-        let mut cc_bytes = cc_bytes.lock().unwrap();
-        cc_bytes.resize(offset + chunk.len(), 0);
-        cc_bytes[offset..offset + chunk.len()].copy_from_slice(&local_result);
-        cc_cat.inc(1);
-    });
-    let ccs = bincode::deserialize(&cc_bytes.into_inner().unwrap()).unwrap();
+    let ccs = bincode::deserialize(&cc_bytes).unwrap();
     Ok(ccs)
 }  
 
@@ -714,7 +708,7 @@ fn gather_lines_to_live(cc_groups: DashMap<usize, Vec<(usize, usize)>>, floor: u
     let survivor_pbar = build_pbar(cc_groups.len(), "CCs");
     let survivors : Vec<(usize, usize)> = cc_groups
         .into_par_iter()
-        .flat_map(|(k, val)| {
+        .flat_map(|(_, val)| {
             let survivors: Vec<(usize, usize)> = if val.len() <= floor {
                 // If cc is <= floor, keep nothing
                 Vec::new()
@@ -1145,6 +1139,39 @@ fn uf_size_prune(config: &PathBuf, ccs: &PathBuf, output: &PathBuf, floor: usize
     Ok(())  
 }
 
+fn count_docs_from_sigs(config: &PathBuf, sig_storage: &PathBuf) -> Result<(), Error> {
+    println!("Starting counting of docs from sigs");
+    let start_main = Instant::now();
+    let config = MinHashConfig::load(config).unwrap();
+
+    let band_sigs = _collect_band_sigs(sig_storage).unwrap();
+    let sig_files: Vec<PathBuf> = band_sigs.into_iter()
+        .flat_map(|(_,v)| v)
+        .collect();
+    let counter: DashSet<(usize, usize)> = DashSet::new();
+    let pbar = build_pbar(sig_files.len(), "Sig Files");
+    let sig_size = config.sig_size;
+    let path_size = config.path_size;
+    let line_size = config.line_size;
+    sig_files.into_par_iter()
+        .for_each(|p| {
+            let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
+            contents.chunks(sig_size + path_size + line_size)
+                .for_each(|entry| {
+                let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
+                let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();                
+                counter.insert((path_id, line_id));
+            });
+            pbar.inc(1);
+        });
+
+    println!("-------------------------");
+    println!("Completed counting docs from sigs");
+    println!("Number of docs is {:?}", counter.len());
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    Ok(())
+
+}
 
 fn annotate_cc(config: &PathBuf, ccs: &PathBuf, output: &PathBuf) -> Result<(), Error> {
     // Adds a 'cc_size' attribute to all jsons and writes them to output 
@@ -1222,7 +1249,11 @@ fn main() {
         },
         Commands::AnnotateCc {config, ccs, output} => {
             annotate_cc(config, ccs, output)
-        }
+        },
+
+        Commands::CountDocsFromSigs {config, sig_storage} => {
+            count_docs_from_sigs(config, sig_storage)
+        },
 
         _ => {Ok(())}
 
