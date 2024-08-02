@@ -8,7 +8,7 @@ use std::path::{PathBuf};
 use std::io::{BufRead};
 use rand::prelude::*;
 use tiktoken_rs::{p50k_base, CoreBPE};
-use serde_json::Value;
+use serde_json::{Value, json};
 use regex::Regex;
 use ndarray::{Array1};
 use rand::{Rng, SeedableRng};
@@ -130,10 +130,10 @@ enum Commands {
         sig_storage: PathBuf,
 
 
-        #[arg(long, default_value_t=13)]
+        #[arg(long, default_value_t=14)]
         num_bands: u32,
 
-        #[arg(long, default_value_t=10)]
+        #[arg(long, default_value_t=9)]
         band_size: usize,    
 
         #[arg(long, default_value_t=5)]
@@ -177,10 +177,10 @@ enum Commands {
         #[arg(long, default_value_t=0)] // 0 is default
         band_start: u32,
 
-        #[arg(long, default_value_t=13)]
+        #[arg(long, default_value_t=14)]
         num_bands: u32,
 
-        #[arg(long, default_value_t=10)]
+        #[arg(long, default_value_t=8)]
         band_size: usize,    
 
         #[arg(long, default_value_t=5)]
@@ -265,6 +265,19 @@ enum Commands {
         /// Of the ccs with size > floor, only keeps this many of the ccs
         #[arg(required=true, long)]
         ceil:usize
+    },
+
+    AnnotateCc {
+        // Annotates each document with their CC size 
+        #[arg(required=true, long)]
+        config: PathBuf,
+
+        #[arg(required=true, long)]
+        ccs: PathBuf,
+
+        #[arg(required=true, long)]
+        output: PathBuf,
+
     }
 
 }
@@ -683,6 +696,7 @@ fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error>
 
 
 fn group_docs_by_cc(cc: &Vec<((usize, usize), usize)>) -> DashMap<usize, Vec<(usize, usize)>> {
+    // Maps [((doc_id, line_num), cc_id)] -> {cc_id -> [(doc_id, line_num), ...]}
     let cc_group: DashMap<usize, Vec<(usize, usize)>> = DashMap::new();
 
     let cc_pbar = build_pbar(cc.len(), "Docs");
@@ -752,6 +766,25 @@ fn gather_lines_to_kill_ccs(cc_groups: DashMap<usize, Vec<(usize, usize)>>, floo
     grouped_ltk
 }
 
+/*=================================================================
+=                         ANNOTATE HELPERS                        =
+=================================================================*/
+
+fn build_annotation_lookup(cc_groups: DashMap<usize, Vec<(usize, usize)>>) ->  DashMap<usize, DashMap<usize, usize>> {
+    // Maps {cc_id -> [(doc_id, line_num),...]} to {doc_id -> {line_id: cc_size}}
+    let annotations : DashMap<usize, DashMap<usize, usize>> = DashMap::new();
+    let pbar = build_pbar(cc_groups.len(), "CCs");
+
+    cc_groups.into_par_iter()
+        .for_each(|(cc_id, docvec)| {
+            let cc_size = docvec.len();
+            for (doc_id, line_num) in docvec {
+                annotations.entry(doc_id).or_default().insert(line_num, cc_size);
+            }
+            pbar.inc(1);
+    });
+    annotations
+}
 
 /*=================================================================
 =                         WRITE OUTPUTS                           =
@@ -815,7 +848,7 @@ fn scrub_lines_survivors(config: &MinHashConfig, lines_to_survive: DashMap<usize
                          output_directory: &PathBuf) -> (usize, usize) {
     let documents_seen = AtomicUsize::new(0);
     let documents_removed = AtomicUsize::new(0);
-    let pbar = build_pbar(lines_to_survive.len(), "Paths");
+    let pbar = build_pbar(config.indices.len(), "Paths");
     config.indices.par_iter().for_each(|(path, idx)| {
         if lines_to_survive.contains_key(idx) {
             let output_filename = get_output_filename(&config.input, path, output_directory)            ;
@@ -853,6 +886,43 @@ fn keep_survivors(input_filename: &PathBuf, output_filename: &PathBuf, survivors
     Ok((lines_seen, lines_removed))
 }
 
+fn annotate_dataset(config: &MinHashConfig, annotations: DashMap<usize, DashMap<usize, usize>>, output_directory: &PathBuf) -> Result<usize, Error> {
+    let documents_seen = AtomicUsize::new(0);
+    let pbar = build_pbar(config.indices.len(), "Paths");
+    config.indices.par_iter().for_each(|(path, idx)| {
+        let binding = annotations.entry(*idx).or_default();
+        let this_lookup = binding.value();
+        let output_filename = get_output_filename(&config.input, path, output_directory);
+        let this_docs = annotate_path(path, this_lookup, output_filename).unwrap();
+        documents_seen.fetch_add(this_docs, Ordering::SeqCst);
+        pbar.inc(1);
+    });
+    Ok(documents_seen.into_inner())
+}
+
+
+fn annotate_path(input_filename: &PathBuf, lookup: &DashMap<usize, usize>, output: PathBuf) -> Result<usize, Error> {
+    let data = read_pathbuf_to_mem(input_filename).unwrap();
+    let mut line_num = 0;
+    let mut output_bytes = Vec::new();
+    for line in data.lines() {
+        let line = line?;
+        let mut json: Value = serde_json::from_str(&line).unwrap();
+        let cc_size = if lookup.contains_key(&line_num) {
+            *lookup.get(&line_num).unwrap().value()
+        } else {
+            1
+        };
+        json["cc_size"] = json!(cc_size);
+        let json_bytes = serde_json::to_vec(&json).unwrap();
+        output_bytes.extend(json_bytes);
+        output_bytes.push(b'\n');
+        line_num += 1;
+    }
+
+    write_mem_to_pathbuf(&output_bytes, &output).unwrap();
+    Ok(line_num)
+}
 
 
 /*=================================================================
@@ -1076,6 +1146,39 @@ fn uf_size_prune(config: &PathBuf, ccs: &PathBuf, output: &PathBuf, floor: usize
 }
 
 
+fn annotate_cc(config: &PathBuf, ccs: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+    // Adds a 'cc_size' attribute to all jsons and writes them to output 
+    println!("Starting CC Annotation...");
+    let start_main = Instant::now();
+    let config = MinHashConfig::load(config).unwrap();
+
+    println!("Loading CCS...");
+    let start_load_cc = Instant::now();
+    let loaded_ccs = load_cc_list(ccs).unwrap();
+    println!("Loaded CCs in {:?} (s)", start_load_cc.elapsed().as_secs());
+
+    println!("Grouping docs by CC...");
+    let start_group_cc = Instant::now();
+    let groups = group_docs_by_cc(&loaded_ccs);
+    println!("Grouped CCs in {:?} (s)", start_group_cc.elapsed().as_secs());
+
+    println!("Building annotation lookup...");
+    let start_annotation_lookup = Instant::now();
+    let annotations = build_annotation_lookup(groups);
+    println!("Built annotation lookup in {:?} (s)", start_annotation_lookup.elapsed().as_secs());
+
+    println!("Annotating dataset");
+    let start_annotate = Instant::now();
+    let num_docs = annotate_dataset(&config, annotations, output).unwrap();
+    println!("Annotation finished in {:?} (s)", start_annotate.elapsed().as_secs());
+
+    println!("-------------------------");
+    println!("Completing CC Annotation");
+    println!("Annotated {:?} docs", num_docs);
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    Ok(())    
+}
+
 
 /*=================================================================
 =                                 MAIN                            =
@@ -1116,6 +1219,9 @@ fn main() {
 
         Commands::UfSizePrune {config, ccs, output, floor, ceil} => {
             uf_size_prune(config, ccs, output, *floor, *ceil)
+        },
+        Commands::AnnotateCc {config, ccs, output} => {
+            annotate_cc(config, ccs, output)
         }
 
         _ => {Ok(())}
