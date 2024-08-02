@@ -1120,7 +1120,7 @@ fn uf_size_prune(config: &PathBuf, ccs: &PathBuf, output: &PathBuf, floor: usize
     // If floor > 1, can just collect docs to KEEP
     println!("Starting scrub of dataset...");
     let start_scrub = Instant::now();
-    let (documents_seen, documents_removed) = if floor == 0 {
+    let (documents_seen, documents_removed) = if floor > 0 {
         let grouped_survivors = gather_lines_to_live(groups, floor, ceil);
         scrub_lines_survivors(&config, grouped_survivors, output)
     } else {
