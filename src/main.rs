@@ -1,4 +1,5 @@
 
+use std::cmp::max;
 use std::sync::Mutex;
 use serde::{Serialize, Deserialize};
 use std::collections::{VecDeque, HashMap};
@@ -530,7 +531,7 @@ fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths:
 struct BandGroup(Vec<Vec<(usize, usize)>>);
 
 
-fn build_band_group(band_sigs: Vec<PathBuf>, sig_size: usize, path_size: usize, line_size: usize) -> 
+fn build_band_group(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize, line_size: usize) -> 
     Result<Vec<Vec<(usize, usize)>>, Error> {
     // For a group of files that contain signatures within the same band (and a sig chunk)
     // Collects a list of (path_id: usize, line_id: usize) for each clique
@@ -588,8 +589,6 @@ fn add_band_group_to_uf(band_group: &PathBuf, uf: &UFRush, config: &MinHashConfi
             while group.len() > 0 {
                 let cur = group.pop().unwrap();
                 let cur_id = pair2docid(cur, line_size);
-                //println!("PAIR {:?} {:?}", last, cur);
-                //println!("IDS {:?} {:?}", last_id, cur_id);
                 uf.unite(last_id, cur_id);
             }
     });
@@ -653,9 +652,62 @@ fn count_cc_sizes(ccs: Vec<((usize, usize), usize)>) -> HashMap<usize, usize> {
     cc_sizes
 }
 
+fn collect_singletons(band_sigs: &Vec<PathBuf>, max_lines_per_doc: &DashMap<usize, usize>, config: &MinHashConfig) -> Result<(), Error> {
+    // band_sigs is files with signature entries
+    // max_lines_per_doc maps {doc_id: max(line_nums)} [mutated but not returned]
+    let pbar = build_pbar(band_sigs.len(), "Band Sig Files");
+    let entry_size = config.sig_size + config.path_size + config.line_size;
+    let sig_size = config.sig_size;
+    let line_size = config.line_size;
+    let path_size = config.path_size;
+
+    band_sigs.par_iter().for_each(|path| {
+        let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
+        contents.chunks(entry_size).for_each(|entry| {
+            let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
+            let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();
+            max_lines_per_doc.entry(path_id).and_modify(|e| *e = max(*e, line_id)).or_insert(line_id);
+        });
+        pbar.inc(1)
+    });    
+
+    Ok(())
+}
 
 
+fn _get_singleton_name(group_storage: &PathBuf) -> PathBuf {
+    group_storage.clone()
+        .join(format!("singletons.bin.gz"))
+}
 
+
+fn save_singletons(max_lines_per_doc: DashMap<usize, usize>, output: &PathBuf) 
+    -> Result<(), Error> {
+    let singleton_name = _get_singleton_name(output);
+    let data: Vec<(usize, usize)> = max_lines_per_doc.par_iter().map(|r| (*r.key(), *r.value())).collect();
+    let serialized: Vec<u8> = serde_json::to_vec(&data).unwrap();//::serialize(&BandGroup(band_group)).unwrap();
+    write_mem_to_pathbuf(&serialized, &singleton_name).unwrap();
+
+    Ok(())
+}
+
+
+fn add_singletons_to_uf(singletons_path: &PathBuf, uf: &UFRush, config: &MinHashConfig) -> Result<(), Error> {
+    // Populates the UF with all the nodes so singleton nodes appear in it
+    let singleton_data = read_pathbuf_to_mem(singletons_path).unwrap().into_inner().into_inner();
+    let singletons: Vec<(usize, usize)> = serde_json::from_slice(&singleton_data).unwrap();
+    let line_size = config.line_size;
+
+    let pbar = build_pbar(singletons.len(), "Singleton paths");
+    singletons.par_iter().for_each(|(doc_id, max_line)| {
+        for line_num in 0..(max_line+1) {
+            let cur_id = pair2docid((*doc_id, line_num), line_size);
+            uf.find(cur_id);
+        }
+        pbar.inc(1);
+    });
+    Ok(())
+}
 
 
 /*=================================================================
@@ -1036,16 +1088,29 @@ fn build_edges(config: &PathBuf, sig_storage: &PathBuf, group_storage: &PathBuf)
     let start_main = Instant::now();
     let config = MinHashConfig::load(config).unwrap();
 
+    let start_edges = Instant::now();
+    println!("Starting edge collection...");
     let band_sigs = _collect_band_sigs(sig_storage).unwrap();
-
     let pbar = build_pbar(band_sigs.len(), "Band Groups");
-    band_sigs.into_par_iter()
-        .for_each(|(k, v)| {
-            let (band_id, sig_chunk) = k;
-            let band_group = build_band_group(v, config.sig_size, config.path_size, config.line_size).unwrap();
-            save_band_group(band_group, group_storage, band_id, sig_chunk).unwrap();
+    band_sigs.par_iter()
+        .for_each(|entry| {
+            let (band_id, sig_chunk) = entry.key();
+            let band_group = build_band_group(entry.value(), config.sig_size, config.path_size, config.line_size).unwrap();
+            save_band_group(band_group, group_storage, *band_id, *sig_chunk).unwrap();
             pbar.inc(1);
         });
+    println!("Completed edge building in {:?} seconds", start_edges.elapsed().as_secs());
+
+    let start_singletons = Instant::now();
+    println!("Collecting singletons...");
+    let max_line_per_doc: DashMap<usize, usize> = DashMap::new(); // Maps doc_id -> max line_num
+    if let Some(entry) = band_sigs.iter().next() {
+        collect_singletons(entry.value(), &max_line_per_doc, &config).unwrap();
+    }
+    save_singletons(max_line_per_doc, &group_storage).unwrap();
+    println!("Collected singletons in {:?} seconds", start_singletons.elapsed().as_secs());
+
+
     println!("-------------------------");
     println!("Completed building all edges");
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
@@ -1063,6 +1128,8 @@ fn build_uf(config: &PathBuf, band_group_storage: &PathBuf, output: &PathBuf, cc
     let uf = UFRush::new();
 
     let all_band_groups = expand_dirs(vec![band_group_storage.clone()], Some(vec![".group.bin.gz"].as_slice())).unwrap();
+    let singletons_path = _get_singleton_name(band_group_storage);
+    add_singletons_to_uf(&singletons_path, &uf, &config).unwrap();
     let pbar = build_pbar(all_band_groups.len(), "Band groups");
     all_band_groups.into_par_iter().for_each(|band_group| {
         add_band_group_to_uf(&band_group, &uf, &config).unwrap();
