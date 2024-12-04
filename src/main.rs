@@ -20,7 +20,7 @@ use crate::storage::{IntValueEnum, SignatureWriter, MinHashConfig};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
+use std::panic::catch_unwind;
 
 
 
@@ -260,7 +260,11 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
         docs_hashed += 1;
         let json: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num.as_usize()));
         let text = json["text"].as_str().unwrap();
-        let tokens = preprocess_text(text, &tokenizer);
+
+        let Ok(tokens) = catch_unwind(|| preprocess_text(text, &tokenizer)) else {
+            println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num);
+            continue;
+        };
         let hash_vals = get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size);
         let bands = hash_vals.into_shape((num_bands, band_size)).unwrap();
         for (row, band_seed) in bands.rows().into_iter().zip(band_seeds.iter()) {
