@@ -544,3 +544,4 @@ impl SignatureWriter {
 		Ok(())
 	}
 }
+

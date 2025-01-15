@@ -26,6 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bincode;
 
 use crate::uf_rush2::UFRush;
+use std::panic::catch_unwind;
+
+
 
 pub mod s3;
 pub mod io;
@@ -335,9 +338,13 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
         let line_num = IntValueEnum::new(line_num, config.line_size);
         let line = line.unwrap();
         docs_hashed += 1;
-        let json: Value = serde_json::from_str(&line).unwrap();
+        let json: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num.as_usize()));
         let text = json["text"].as_str().unwrap();
-        let tokens = preprocess_text(text, &tokenizer);
+
+        let Ok(tokens) = catch_unwind(|| preprocess_text(text, &tokenizer)) else {
+            println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num);
+            continue;
+        };
         let hash_vals = get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size);
         let bands = hash_vals.into_shape((num_bands, band_size)).unwrap();
         for (row, band_seed) in bands.rows().into_iter().zip(band_seeds.iter()) {
@@ -671,6 +678,8 @@ fn collect_singletons(band_sigs: &Vec<PathBuf>, max_lines_per_doc: &DashMap<usiz
         pbar.inc(1)
     });    
 
+
+    //println!("(Aug) Loaded path data into groups in {:?} secs", aug_start.elapsed().as_secs());
     Ok(())
 }
 
