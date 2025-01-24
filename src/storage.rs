@@ -21,6 +21,7 @@ line_num: identifier for which line num within a file
 	where signature needs to be big enough to not allow collisions
 
 */
+use std::hash::DefaultHasher;
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -428,6 +429,57 @@ impl MinHashConfig {
 
 
 
+#[derive(Serialize, Deserialize)]
+pub struct FileMap {
+	pub local_input: PathBuf,
+	pub remote_input: PathBuf,
+	pub indices: HashMap<PathBuf, usize>	
+}
+
+impl FileMap {
+	pub fn new(local_input: &PathBuf, remote_input: &PathBuf) -> Result<Self, Error> {
+		let input_vec = vec![local_input.clone()];
+		let paths = expand_dirs(input_vec.clone(), None).unwrap();
+
+		let stripped_paths: Vec<PathBuf> = paths.iter().map(|p| p.strip_prefix(local_input.clone()).unwrap().to_path_buf()).collect();
+
+		let indices : HashMap<PathBuf, usize> = stripped_paths.iter()
+			.enumerate()
+			.map(|(i, p)| (p.clone(), i))
+			.collect();
+		Ok(FileMap {local_input: local_input.clone(),
+				    remote_input: remote_input.clone(),				    
+					indices})
+	}
+
+	pub fn save(&self, save_loc: &PathBuf) -> Result<(), Error> {
+		let json_bytes = serde_json::to_vec(self).unwrap();
+		write_mem_to_pathbuf(&json_bytes, &save_loc)
+	}
+
+	pub fn load(load_loc: &PathBuf) -> Result<Self, Error> {
+		let json_bytes = read_pathbuf_to_mem(&load_loc).unwrap();
+		let cursor = json_bytes.into_inner();
+		let binding = cursor.into_inner();
+		let contents = binding.as_slice();
+		let filemap: FileMap = serde_json::from_slice(&contents).unwrap();
+		Ok(filemap)
+	}
+
+
+	pub fn get_path_chunk(&self, chunk_id: usize, num_chunks: usize) -> Vec<(PathBuf, usize)> {
+		let chunk : Vec<(PathBuf, usize)> = self.indices.iter()
+			.filter(|(_k, v)| *v % num_chunks == chunk_id)
+			.map(|(k, v)| (k.clone(), *v))
+			.collect();
+		chunk
+	}
+
+	pub fn len(&self) -> usize {
+		self.indices.len()
+	}
+}
+
 
 /*==========================================================
 =                     Band Storage Config.                 =
@@ -513,7 +565,8 @@ impl SignatureWriter {
 	pub fn get_filename(storage_loc: &PathBuf, band_id: u32, sig_chunk: usize, path_chunk: usize) -> PathBuf {
 		storage_loc.clone()
 			.join(format!("band_{:016}", band_id))
-			.join(format!("sigchunk{:08}_pathchunk{:08}.sig.bin", sig_chunk, path_chunk))
+			.join(format!("sigchunk_{:08}", sig_chunk))
+			.join(format!("pathchunk_{:08}.sig.bin", path_chunk))
 	}
 
 	pub fn get_input_output_filenames(&self, output_loc: &PathBuf, path_chunk: usize) -> Vec<(PathBuf, PathBuf)> {
@@ -544,4 +597,80 @@ impl SignatureWriter {
 		Ok(())
 	}
 }
+
+
+/*======================================================
+=                       CC Writer                      =
+======================================================*/
+
+pub struct GenWriter {
+	pub writer: DashMap<usize, Arc<Mutex<BufWriter<File>>>>,
+	storage_loc: PathBuf,
+	num_chunks: usize,
+}
+
+impl GenWriter {
+	pub fn new(storage_loc: &PathBuf, num_chunks: usize, subext: &str) -> Self {
+		let writer : DashMap<usize, Arc<Mutex<BufWriter<File>>>> = DashMap::new();
+		// Create writers
+		println!("NEED TO OPEN {:?} FILES", num_chunks);
+		for chunk in 0..num_chunks {
+			let filename = GenWriter::get_filename(storage_loc, chunk, subext);
+			if let Some(parent_dir) = filename.parent() {
+		        if !parent_dir.exists() {
+		            create_dir_all(parent_dir).unwrap()
+		         }
+		    }
+			let ccwriter = Arc::new(
+				Mutex::new(
+				BufWriter::new(
+				OpenOptions::new()
+				.append(true)
+				.create(true)
+				.mode(0o644)
+				.open(filename)
+				.unwrap()
+			)));
+			writer.insert(chunk, ccwriter);
+		}
+		GenWriter { writer, storage_loc: storage_loc.clone(), num_chunks: num_chunks}
+	}
+
+
+	pub fn get_filename(storage_loc: &PathBuf, chunk: usize, subext: &str) -> PathBuf {
+		storage_loc.clone()
+			.join(format!("chunk_{:08}.{:?}.bin", chunk, subext))
+	}
+
+
+	pub fn write_line(&self, key: usize, contents: Vec<u8>, force_key: usize) -> Result<(), Error> {
+		// hash the key and take mod num_chunks to get location
+
+
+	    let chunk_id = if force_key > 0 {
+	    	force_key
+	    } else {
+		    let mut hasher = DefaultHasher::new();
+		    key.hash(&mut hasher);	    	
+	    	hasher.finish() as usize % self.num_chunks
+	    };
+
+
+		let binding = self.writer.get(&chunk_id).unwrap();
+		let mut cc_writer = binding.lock().unwrap();
+		cc_writer.write_all(&contents).unwrap();
+		
+		Ok(())
+
+	}
+
+	pub fn finish(&self) -> Result<(), Error> {
+		// Flushes all the open writers
+		self.writer.par_iter()
+			.for_each(|entry| entry.value().lock().unwrap().flush().unwrap());
+		Ok(())
+	}
+}
+
+
 
