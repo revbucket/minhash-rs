@@ -4,17 +4,15 @@ use std::io::Write;
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use glob::glob;
-use std::cmp::max;
-use std::sync::Mutex;
 use serde::{Serialize, Deserialize};
-use std::collections::{VecDeque, HashMap};
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher, DefaultHasher};
 use anyhow::{Result, Error, anyhow};
 use std::path::{PathBuf};
 use std::io::{BufRead};
 use rand::prelude::*;
 use tiktoken_rs::{p50k_base, CoreBPE};
-use serde_json::{Value, json};
+use serde_json::Value;
 use regex::Regex;
 use ndarray::{Array1};
 use rand::{Rng, SeedableRng};
@@ -23,12 +21,11 @@ use sha2::{Sha256, Digest};
 use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
 use clap::{Parser, Subcommand};
-use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, get_output_filename, has_json_extension};
+use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
 use crate::storage::{IntValueEnum, SignatureWriter, GenWriter, MinHashConfig, FileMap, to_byte_size, compute_sig_size};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use bincode;
 
 use crate::uf_rush2::UFRush;
 use std::panic::catch_unwind;
@@ -51,17 +48,24 @@ const CC_CHUNK_SIZE: usize = usize::MAX; //100 * 1024 * 1024; // 100 MB chunk si
 /*
 New plan:
 It helps to consider minHash in phases:
-Phase 1: Compute (band_id, signature, doc_id) for every document
-Phase 2: For each band, group along signatures and take all but the first doc_id 
-         in each group to add to a 'lines to kill' set (file_id -> {lines...})
-Phase 3: Merge all the 'lines to kill' above 
-Phase 4: Delete lines from documents and put to outputs
 
-Where the slowest step (by far!) is phase 1. This also requires a bunch of RAM
+Phase 1: Look at all the file paths we want to run minHash dedup on and rename them
+         with usize identifiers. Store this in a FileMap structure. 
+         In this way, all documents are now uniquely identified by their 
+         (path_id, line_num)
 
-It helps to think of phase one as a matrix where rows
-                
-                        Files
+Phase 2: Compute (band_id, signature, doc_id) for every document.
+         This is the heavy minhashing step, but can be parallelized 
+         across chunks over the paths. 
+            
+         Essentially this works as follows -- for each path
+         we loop over documents and compute it's minhash signatures. 
+         We compute band_size * num_bands signatures, and then hash
+         the signature across each band (rows in the pic below).
+         If any two documents share the same (band_id, siganture), then
+         they are duplicates.
+         
+                        Band Size
              ----------------------------
             |                            |
             |                            |
@@ -69,37 +73,57 @@ It helps to think of phase one as a matrix where rows
             |                            |
             |                            |
             ------------------------------
-Where the entries are signatures.
-
-Plan:
-Step 1:  Build and save PathLookup object 
-Step 2:  Break matrix into submatrices groups of rows/cols, handle each submatrix separately.
-         For a submatrix (group of files, group of band_seeds):
-         - Loop over files (in parallel)
-         - For each file:
-             + For each document in file:
-                 * Compute signature for all bands in this submatrix
-                 * Write to a file ON DISK with file structure like:
-                     band_id/                        # which band id/band seed this is (which row)
-                         sigchunk_0000/              # chunk signatures based on range (maybe first byte?)
-                             filechunk_0000.bin      # which group of files this is    (which cols)
-                 where each line gets a bytestring of (signature,file_id,line_num)
-         - And then either:
-             + upload all these files
-             + proceed through all submatrices
-
-Step 3:  Merge all ^ files computed above together into a to-kill-list
-         - Maintain a global to-kill-list structure
-         - For each band_id/sigchunk:
-             - Group the lines together in lists (dashmap<signature, Vec<doc_id>>)
-             - Add all but the first element of each group into global structure 
-
-Step 4: Use global to-kill-list to clean dataset of duplicates 
 
 
-NOTE:
-    general pattern for async-y things is that we will init a runtime 
-    to interact with s3 (read, write ,list files) and block until that's done. 
+Phase 3: Collect edges, linking all the documents that share the same 
+         (band_id, siganture) together. Store these in a separate set of files.
+
+Phase 4: Combine all the edges and build a GLOBAL union find data structure and 
+         use this to collect connected components. Store both these connected 
+         components (for later examination), and collect the lines that should
+         be removed from the dataset (grouped by path_chunk, so they can be pruned
+         in a multinode setting)
+
+Phase 5: Clean the duplicate documents from the paths. Phase 4 tells us which 
+         lines of each path should be removed.
+
+
+(
+Auxiliary phase: For examination purposes, we can look at each connected component
+                  and get stats on the true pairwise jaccard similarity between 
+                  documents marked as "duplicates"
+)
+
+----------------
+Some design notes:
+
++ Config: Globally, this requires a json config. I'll make an example when
+          I square up exactly what I need here.
+
++ Disk space: We rely heavily on storing auxiliary data structures on disk.
+              Basically there's a state change after every phase where we make
+              some new files after every phase. I'll build some python code 
+              to read these for debuggy purposes later (TBD). Each section 
+              will describe the file structure and contents in comments below.
+
++ Parallelism: Phase 3 and phase 4 need to be done globally (unfortunately, 
+               there's no avoiding at least one global step). Phase 1 only 
+               really needs access to the filenames but is very cheap.
+               Phase 2, 4, and 5 are the heavy steps and can be done across
+               file parallelism. This would require some coordination with the
+               global data structures generated by phase 3 and 4.
+
++ s3: We don't touch s3 in rust. I have yet to find a package that works
+      reliably, so let's just assume that all interaction between the LFS 
+      and s3 is done outside the context of this rust code 
+
+
++ Input path structure: For simplicity, we require that the input paths all 
+                        live in one directory and have unique basenames.
+
+
++ One fell swoop: if your dataset is small enough that you just want to do 
+                  all phases in one command, use `min-hash`
 */
 
 
@@ -123,32 +147,8 @@ enum Commands {
     #[clap(arg_required_else_help = true)]
 
     MinHash { 
-        /// (List of) directories/files (on s3 or local) that are jsonl.gz or jsonl.zstd files
-        #[arg(required=true, long, num_args=1..)]
-        input: Vec<PathBuf>,
-
-        /// Output location (may be an s3 uri)
         #[arg(required=true, long)]
-        output: PathBuf,
-
-        #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
-        num_docs: usize,
-
-        #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
-        max_lines_per_path: usize,
-
-        #[arg(required=true, long)]
-        sig_storage: PathBuf,
-
-
-        #[arg(long, default_value_t=14)]
-        num_bands: u32,
-
-        #[arg(long, default_value_t=9)]
-        band_size: usize,    
-
-        #[arg(long, default_value_t=5)]
-        ngram_size: usize,  
+        config: PathBuf,
      }, 
 
 
@@ -157,27 +157,6 @@ enum Commands {
         config: PathBuf   
     },
 
-    BuildConfig {
-        // Just makes and saves the path lookup object 
-
-        /// Input locations for paths to hash
-        #[arg(required=true, long, num_args=1..)]
-        input: Vec<PathBuf>,        
-
-        /// Output location (may be an s3 uri)
-        #[arg(required=true, long)]
-        output: PathBuf,
-
-        /// How many documents we have 
-        /// (used to infer how many bytes we need to store)
-        #[arg(long, default_value_t=10_000_000_000)] // 10B docs by default?
-        num_docs: usize,
-
-        /// Max # of lines per document 
-        /// (used to infer how many bytes we need to store)
-        #[arg(long, default_value_t=16_000_000)] // 3 bytes by default
-        max_lines_per_path: usize,
-    },
 
     HashOnly {
         // Just runs and saves the hashes
@@ -198,20 +177,6 @@ enum Commands {
         config: PathBuf
     },
 
-    Finish {
-        /// Path name of the config file
-        #[arg(required=true, long)]
-        config: PathBuf,
-
-        /// where the stored hashes live
-        #[arg(required=true, long)]
-        sig_storage: PathBuf,
-
-        /// Where the output files go 
-        #[arg(required=true, long)]
-        output: PathBuf,        
-
-    },
 
     BuildEdges {
         #[arg(required=true, long)]
@@ -241,38 +206,11 @@ enum Commands {
         #[arg(required=true, long)]
         config: PathBuf, 
 
-        #[arg(required=true, long)]
-        ccs: PathBuf,
+        #[arg(long, default_value_t=0)]
+        path_chunk: usize,
 
-        #[arg(required=true, long)]
-        output: PathBuf,
-
-        /// Removes all documents that belong to a cc that has size <= than this
-        #[arg(required=true, long)]
-        floor: usize,
-
-        /// Of the ccs with size > floor, only keeps this many of the ccs
-        #[arg(required=true, long)]
-        ceil:usize
-    },
-
-    AnnotateCc {
-        // Annotates each document with their CC size 
-
-        #[arg(required=true, long)]
-        config: PathBuf,    
-        #[arg(required=true, long)]
-        ccs: PathBuf, 
-        #[arg(required=true, long)]
-        output: PathBuf,      
-    },             
-
-    CountDocsFromSigs {
-        #[arg(required=true, long)]
-        config: PathBuf,
-
-        #[arg(required=true, long)]
-        sig_storage: PathBuf,
+        #[arg(long, default_value_t=1)]
+        num_path_chunks: usize
     }
 
 }
@@ -294,16 +232,125 @@ fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
 }
 
 
+/*=================================================================
+=                      PHASE 1: BUILD FILE MAP                    =
+=================================================================*/
+/* GLOBAL STEP:
+
+    This phase collects the paths (on the LFS) that we want to run minhash on.
+    This creates and saves (as json) an object with the 
+    - local_input: directory where the local files live
+    - remote_input: direcotry (on s3, maybe) where these files were sourced from.
+                    This is just for clean bookkeeping and not actually used.
+    - indices: map from {local_filename -> path_id} where path_id is an integer.
+               Life is way easier if each path just has a unique integral id.
+*/
+
+
+fn build_file_map(config: &PathBuf) -> Result<(), Error> {
+    /*
+    - Config is the path to the json minhash config
+    This function reads all the files contained in the config.input path and creates a "filemap"
+    which is a .json.gz that stores the 
+    map from {file_name : pathbuf -> file_id : usize}
+    */
+    let config_contents = read_pathbuf_to_mem(config).unwrap();
+    let config_value: serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+
+    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
+    create_dir_all(&working_dir).unwrap();
+
+
+    let local_input = PathBuf::from(config_value["local_input"].as_str().unwrap());
+    let remote_input = PathBuf::from(config_value["remote_input"].as_str().unwrap());
+    let file_map = FileMap::new(&local_input, &remote_input).unwrap();
+
+    file_map.save(&working_dir.join("filemap.json.gz"))
+}
 
 /*=================================================================
-=                          PROCESS SINGLE FILE                    =
+=                      PHASE 2: HASH THE PATHS                    =
 =================================================================*/
-/* 
-Input in this section is a single file (pathbuf), all hyperparams,
-and the shared data structure keeping track mapping:
-    {(band_seed) -> {signature -> [(path_id, line_id), ...]}}
-Preprocessing flow is to use the slimpajama flow, and then tokenize with tiktoken
-*/ 
+/* MULTINODE PARALLELISM ON PATH CHUNKS:
+    
+    This creates the signature files. The signature files are named like:
+    working_dir/
+    └── signatures/
+       └── band_XXX/
+           └── sigchunk_YYY/
+               └── pathchunk_ZZZ.sig.bin
+
+    Where the:
+    - band_id (XXX) ranges from 0..num_bands (specified in the main config)
+    - sigchunk_id (YYY) ranges from 0..num_sigchunks (specified in the main config)
+    - pathchunk (ZZZ) ranges from 0..num_path_chunks (in the args of this function)
+
+    
+    And the contents of each file is a packing of bits of chunk size dependent on the number 
+    of paths/maximum_line_size we have. But generally each file contains encoded-then-concatenated 
+    triples of the form 
+        `(signature, path_id, line_num)`
+    where the exact size of each component can differ based on configs
+*/
+
+
+
+fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
+    println!("Starting part of Minhash run | config {:?} | chunk {:?}/{:?}", config, path_chunk, num_path_chunks);
+    let start_main = Instant::now();    
+
+    // Initialize everything we need to hash...
+    let config_contents = read_pathbuf_to_mem(config).unwrap();
+    let config_value: serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+
+    // -- Set up hashing stuff
+    let perm_seed: usize = match config_value.get("x") {
+        Some(val) => val.as_u64().unwrap() as usize,
+        None => 0,
+    };    
+    let num_bands = config_value["num_bands"].as_u64().unwrap() as usize;
+    let band_size = config_value["band_size"].as_u64().unwrap() as usize;
+    let tokenizer_str = config_value["tokenizer_str"].as_str().unwrap();
+    let ngram_size = config_value["ngram_size"].as_u64().unwrap() as usize;
+    let band_seeds: Vec<u32> = _expand_band_seeds(&vec![perm_seed as u32], num_bands)
+        .into_iter()
+        .map(|x| x as u32)
+        .collect();
+
+    // -- Get files to hash
+    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
+    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
+    let local_input = file_map.local_input.clone();    
+    let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
+
+    // -- Handle storage stuff
+    let sig_storage = working_dir.clone().join("sig_storage");
+    create_dir_all(&sig_storage).unwrap();
+    let num_sig_chunks = config_value["num_sig_chunks"].as_u64().unwrap() as usize;
+    let signature_writer = SignatureWriter::new(&sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
+    let path_size = to_byte_size(file_map.indices.len());
+    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
+    let sig_size = compute_sig_size(config_value["num_docs"].as_u64().unwrap() as usize);
+    
+
+    // And then loop through files and hash everything
+    let start_hashing = Instant::now();
+    let total_docs_hashed = AtomicUsize::new(0);    
+    let hash_pbar = build_pbar(this_chunk.len(), "Paths");
+    this_chunk.par_iter().for_each(|(path, path_id)| {
+        let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, band_size, ngram_size, 
+                                       tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size).unwrap();
+        total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
+        hash_pbar.inc(1);
+    });
+    signature_writer.finish().unwrap();
+    println!("(Chunk {:?}) ...collected all hashes in {:?} seconds", path_chunk, start_hashing.elapsed().as_secs());
+    println!("-------------------------");
+    println!("Completing part of Minhash run | config {:?} | chunk {:?}/{:?}", config, path_chunk, num_path_chunks);
+    println!("Computed hashes for {:?} bands, {:?} docs", num_bands, total_docs_hashed.into_inner());
+    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
+    Ok(())
+}   
 
 
 fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size: usize, ngram_size: usize,
@@ -487,8 +534,90 @@ fn mod_add(a: u64, b: u64, modulus: u64) -> u64 {
 
 
 /*=================================================================
-=                            EDGE GATHERING HELPERS               =
+=                      PHASE 3: GATHER EDGES                      =
 =================================================================*/
+/* MULTINODE PARALLELISM ON BAND_ID 
+    This creates the edge and singleton files.
+
+
+    ----- edge files -----
+    Edge file naming structure:
+    working_dir/
+    └── edges/
+       └── sigchunk_YYY/
+           └── band_XXX.edges.bin
+
+    Where the:
+        - band_id (XXX) ranges from 0..num_bands (pulled from signatures files)
+        - sigchunk_id (YYY) ranges from 0..num_sigchunks (pulled from signatures files)
+
+    And the contents of each file is a packed-bytes object, where if 
+    (path_A, line_1) and (path_B, line_2) have the same signature in a single band, then the bytes
+
+        `(path_A, line_1, path_B, line_2)` 
+    
+    appear in the file.
+
+
+    ----- singleton file ----
+    Singleton file naming structure:
+    working_dir/
+    └── edges/    
+       └── singletons.bin    
+    
+    Where the contents just contain the number of lines per path, encoded as u64's like
+
+        `(path_id, num_lines)`
+
+*/
+
+fn gather_edges(config: &PathBuf) -> Result<(), Error> {
+    println!("Starting edge gather");
+    let start_main = Instant::now();
+
+    // Load the config and initialize things
+    let config_contents = read_pathbuf_to_mem(config).unwrap();
+    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
+    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
+    let path_size = to_byte_size(file_map.indices.len());
+    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
+    let sig_size = compute_sig_size(config_value["num_docs"].as_u64().unwrap() as usize);
+
+    // Gather the files into the proper groups (which should live in the same hash-space-universe)
+    let edge_groups = gather_groups(working_dir.clone().join("sig_storage")).unwrap(); //(sigchunk, band_id) -> [(sigfile)]
+    let single_band_id = edge_groups.iter().next().unwrap().key().1;
+    let singleton_map : Option<DashMap<usize, usize>> = Some(DashMap::new()); // maps path_id -> max line_num 
+
+    // Then build the cliques for each group of (sigchunk, band_id) -- across all files!
+
+    println!("Starting edge collection...");
+    let pbar = build_pbar(edge_groups.len(), "Band groups");
+    edge_groups.par_iter()
+        .for_each(|entry| {
+            let (sigchunk, band_id) = entry.key();
+            let singleton_map_opt = if *band_id == single_band_id {
+                &singleton_map
+            } else {
+                &None
+            };
+
+            let band_group = build_band_group(entry.value(), sig_size, path_size, line_size, &singleton_map_opt).unwrap();
+            let output_filename = working_dir.clone()
+                                  .join("edges")
+                                  .join(format!("sigchunk_{:08}", sigchunk))
+                                  .join(format!("band_{:08}.edges.bin", band_id));
+            save_band_group(band_group, output_filename, path_size, line_size).unwrap();
+            pbar.inc(1);
+        });
+
+
+    save_singletons(singleton_map.unwrap(), &working_dir.clone().join("edges").join("singletons.bin")).unwrap();
+    println!("... Gathered edges in {:?} seconds", start_main.elapsed().as_secs());
+    // And save these for future use
+
+    Ok(())
+}
 
 fn gather_groups(sig_storage: PathBuf) -> Result<DashMap<(usize, usize), Vec<PathBuf>>, Error> {
     let binding = sig_storage.clone().join("**").join("*.sig.bin");
@@ -515,90 +644,6 @@ fn gather_groups(sig_storage: PathBuf) -> Result<DashMap<(usize, usize), Vec<Pat
 
     Ok(map)
 }
-
-
-
-
-
-
-/*=================================================================
-=                      COLLECT DOCS TO DELETE                     =
-=================================================================*/
-
-fn aggregate_lines_to_kill(config: &MinHashConfig, sig_storage: &PathBuf) -> 
-    Result<DashMap<usize, DashSet<usize>>, Error> {
-    println!("Aggregating hashes into lines to kill...");
-    let start_main = Instant::now();
-
-    // Gather all files in storage and group by (band, sigchunk)
-    let band_sigs = _collect_band_sigs(sig_storage).unwrap();
-
-    let lines_to_kill : DashMap<usize, DashSet<usize>> = DashMap::new();
-    let lines_to_kill_pbar = build_pbar(band_sigs.len(), "File groups");
-    band_sigs.par_iter()
-        .for_each(|v| {
-            _augment_lines_to_kill(&lines_to_kill, &v, config.sig_size, config.path_size, config.line_size).unwrap();
-            lines_to_kill_pbar.inc(1);
-        });
-
-    println!("-------------------------");
-    println!("Aggregated all lines to kill in {:?}", start_main.elapsed().as_secs());
-    Ok(lines_to_kill)
-}
-
-
-fn _collect_band_sigs(sig_storage: &PathBuf) -> Result<DashMap<(u32, usize), Vec<PathBuf>>, Error> {
-    let band_sigs : DashMap<(u32, usize), Vec<PathBuf>> = DashMap::new();
-    let all_files = expand_dirs(vec![sig_storage.clone()], Some(vec![".sig.bin"].as_slice())).unwrap();
-    all_files.par_iter()
-        .for_each(|p| {
-            let key = _extract_bandid_sigchunk(p).unwrap();
-            band_sigs.entry(key).or_default().push(p.clone());
-        });
-    Ok(band_sigs)
-}
-    
-fn _extract_bandid_sigchunk(path: &PathBuf) -> Result<(u32, usize), Error> {
-    let re = Regex::new(r"band_(\d+)/sigchunk(\d+)").unwrap();
-    if let Some(path_str) = path.to_str() {
-        if let Some(captures) = re.captures(path_str) {
-            let band_number = captures[1].parse::<u32>().unwrap();
-            let sigchunk_number = captures[2].parse::<usize>().unwrap();
-            return Ok((band_number, sigchunk_number));
-        }
-    }
-    Err(anyhow!("Failed to extract band_id/sig_chunk!"))
-}
-
-fn _augment_lines_to_kill(lines_to_kill: &DashMap<usize, DashSet<usize>>, paths: &Vec<PathBuf>, 
-                          sig_size: usize, path_size: usize, line_size: usize) -> Result<(), Error> {
-    let aug_start = Instant::now();
-    // Load all data and create mapping of {sig -> [(doc_id, line_num),...]}
-    let entry_size = sig_size + path_size + line_size;
-    let cur_set : DashSet<IntValueEnum> = DashSet::new();
-    paths.iter().for_each(|path| {
-        let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
-        contents.par_chunks(entry_size).for_each(|entry| {
-            let sig = IntValueEnum::from_bytes(entry[..sig_size].to_vec(), sig_size);
-            let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size);
-            let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size);
-            let newly_inserted = cur_set.insert(sig);
-            if !newly_inserted {
-                lines_to_kill.entry(path_id.as_usize()).or_default().insert(line_id.as_usize());                
-            }
-        });
-    });
-    //println!("(Aug) Loaded path data into groups in {:?} secs", aug_start.elapsed().as_secs());
-    return Ok(());
-}
-
-/*=================================================================
-=                      UNION FIND HELPERS                         =
-=================================================================*/
-
-#[derive(Serialize, Deserialize)]
-struct BandGroup(Vec<Vec<(usize, usize)>>);
-
 
 fn build_band_group(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize, line_size: usize, 
                     singleton_map_opt: &Option<DashMap<usize, usize>>) -> 
@@ -642,7 +687,7 @@ fn build_band_group(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize,
     Ok(band_group)
 }
 
-fn save_band_group2(band_group: Vec<Vec<(usize, usize)>>, output_file: PathBuf, path_size: usize, line_size: usize) -> Result<(), Error> {
+fn save_band_group(band_group: Vec<Vec<(usize, usize)>>, output_file: PathBuf, path_size: usize, line_size: usize) -> Result<(), Error> {
     let max_path = IntValueEnum::new(1 << path_size - 1, path_size);
     let max_line = IntValueEnum::new(1 << line_size - 1, line_size);
     let group_end = [max_path.as_bytes(), max_line.as_bytes()].concat();
@@ -677,20 +722,118 @@ fn save_band_group2(band_group: Vec<Vec<(usize, usize)>>, output_file: PathBuf, 
     
 
 
-fn save_band_group(band_group: Vec<Vec<(usize, usize)>>, output: &PathBuf, band_id: u32, sig_chunk: usize) 
-    -> Result<(), Error> {
-    let band_group_name = _get_band_group_name(output, band_id, sig_chunk);
-    let serialized: Vec<u8> = serde_json::to_vec(&band_group).unwrap();//::serialize(&BandGroup(band_group)).unwrap();
+fn save_singletons(max_lines_per_doc: DashMap<usize, usize>, singleton_path: &PathBuf) -> Result<(), Error> {
+    let data: Vec<u8> = max_lines_per_doc
+        .par_iter()
+        .flat_map(|r| {
+            let key_bytes: u64 = (*r.key()) as u64;
+            let val_bytes: u64 = (*r.value() + 1) as u64;
+            vec![key_bytes.to_le_bytes(), val_bytes.to_le_bytes()]
+        })
+        .flat_map(|a| a)
+        .collect();        
 
-    write_mem_to_pathbuf(&serialized, &band_group_name)
+    write_mem_to_pathbuf(&data.as_slice(), singleton_path).unwrap();
+    Ok(())    
 }
 
 
-fn _get_band_group_name(band_group_storage: &PathBuf, band_id: u32, sig_chunk: usize) -> PathBuf {
-    band_group_storage.clone()
-        .join(format!("band_{:016}", band_id))
-        .join(format!("bandgroup{:08}.group.bin.gz", sig_chunk))
+/*=================================================================
+=                      PHASE 4: Build Union Find                  =
+=================================================================*/
+/* NO MULTINODE PARALLELISM! =(
+This creates a union find structure to merge together the edges. 
+It creates the connected-components files and the kill files
+
+    ----- cc files -----
+    working_dir/
+    └── ccs/
+       └── chunk_ZZZ.cc.bin    
+
+    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewed as a single
+    array are elements of the form 
+
+        `(path_id, line_num)`
+
+    saved as u64's, where there's a special token which is the u64::MAX repeated twice, indicating
+    the end of a connected component
+
+
+    ------ kill files ----
+    working_dir/
+    └── kill/
+       └── chunk_ZZZ.kill.bin    
+
+    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewd as a single 
+    array are is a concatenation of subarrays like
+
+        `[path_id, kill_line_1, kill_line_2, ..., kill_line_N, terminus]`
+
+    where each are u64s and terminus is u64::MAX
+*/
+
+
+
+fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
+    // Takes the edges (saved as lists of lists of (path_id, line_num) pairs)
+    // and builds a union find object and then collects CC's and saves a list of ccs.
+    // Unless otherwise specified, also creates a list of to-delete lines, grouped by path_id
+
+    println!("Building UnionFind...");
+    let start_main = Instant::now();
+
+    // Load the config to initialize things
+    let config_contents = read_pathbuf_to_mem(config).unwrap();
+    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
+    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
+    let path_size = to_byte_size(file_map.indices.len());
+    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
+
+    // Build the union find and unite all the edges
+    let uf = UFRush::new();
+    let all_edge_files = expand_dirs(vec![working_dir.clone().join("edges")], Some(vec![".edges.bin"].as_slice())).unwrap();
+    let singletons_path = working_dir.clone().join("edges").join("singletons.bin");
+    let singletons = load_singletons(&singletons_path).unwrap();
+
+    add_singletons_to_uf(singletons, &uf, line_size).unwrap();
+    let pbar = build_pbar(all_edge_files.len(), "Edge files");
+    all_edge_files.into_par_iter().for_each(|p| {
+        add_edge_file_to_uf(&p, &uf, path_size, line_size).unwrap();
+        pbar.inc(1);
+    });
+    println!("Built unionfind in {:?} secs", start_main.elapsed().as_secs());
+
+    // Run the cc collection
+    println!("Starting CC Collection");
+    let start_cc = Instant::now();
+    let ccs = build_ccs(uf, line_size);
+    println!("Built ccs in {:?} secs", start_cc.elapsed().as_secs());
+
+    // Save the list of CCs in a writer object thing
+    // First push these into a dashmap and then use the MAXPATH/MAXLINE paradigm
+    println!("Organizing and saving ccs...");
+    let cc_map : DashMap<usize, Vec<(usize, usize)>> = DashMap::new();
+    let pbar = build_pbar(ccs.len(), "CC components");
+    ccs.par_iter().for_each(|((path_id, line_num), key)| {
+        cc_map.entry(*key).or_default().push((*path_id, *line_num));
+        pbar.inc(1);
+    });
+
+    let cc_dir = working_dir.clone().join("ccs");
+    save_all_ccs(&cc_map, &cc_dir, config_value["num_sig_chunks"].as_u64().unwrap() as usize).unwrap();
+        
+    let kill_list = collect_kill_list(cc_map);
+    let kill_dir = working_dir.clone().join("kill");
+    save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
+    println!("Organized and saved ccs in {:?} secs", start_cc.elapsed().as_secs());
+
+
+    println!("Finished all unionfind stuff in {:?} seconds" , start_main.elapsed().as_secs());
+    Ok(())
 }
+
+
 
 fn add_edge_file_to_uf(edge_file: &PathBuf, uf: &UFRush, path_size: usize, line_size: usize) -> Result<(), Error> {
     let edge_data = read_pathbuf_to_mem(edge_file).unwrap().into_inner().into_inner();
@@ -709,28 +852,6 @@ fn add_edge_file_to_uf(edge_file: &PathBuf, uf: &UFRush, path_size: usize, line_
         last_id = cur_id;
     });
 
-    Ok(())
-}
-
-
-fn add_band_group_to_uf(band_group: &PathBuf, uf: &UFRush, config: &MinHashConfig) -> Result<(), Error> {
-    // Adds all groups in the band group to the unionfind
-    let line_size = config.line_size;
-    let serialized = read_pathbuf_to_mem(band_group).unwrap().into_inner().into_inner();
-
-    let band_group: Vec<Vec<(usize, usize)>> = serde_json::from_slice(&serialized).unwrap();
-    
-    band_group
-        .into_iter()
-        .for_each(|mut group| {
-            let last = group.pop().unwrap();
-            let last_id = pair2docid(last, line_size);            
-            while group.len() > 0 {
-                let cur = group.pop().unwrap();
-                let cur_id = pair2docid(cur, line_size);
-                uf.unite(last_id, cur_id);
-            }
-    });
     Ok(())
 }
 
@@ -764,75 +885,6 @@ fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
 
 }
 
-fn count_cc_sizes(ccs: Vec<((usize, usize), usize)>) -> HashMap<usize, usize> {
-    // First map only the cc hashes into a dashmap counting them 
-    let ccid2count : DashMap<usize, usize> = DashMap::new();
-    let cc_counter_pbar = build_pbar(ccs.len(), "Docs");
-
-    ccs.par_iter()
-        .for_each(|(_, cc_id)| {
-            ccid2count.entry(*cc_id).and_modify(|e| *e += 1).or_insert(1);
-            cc_counter_pbar.inc(1);
-        });
-
-    // Then map values into a second dashmap counting sizes 
-    let cc_sizes_dashmap: DashMap<usize, usize> = DashMap::new();
-    let cc_sizes_pbar = build_pbar(cc_sizes_dashmap.len(), "CCS");
-    ccid2count.par_iter().for_each(|entry| {
-        let cc_size = *entry.value();
-        cc_sizes_dashmap.entry(cc_size).and_modify(|e| *e +=1).or_insert(1);
-        cc_sizes_pbar.inc(1);
-    });
-
-    // Then return a hashmap of these things:
-    let cc_sizes : HashMap<usize, usize> = cc_sizes_dashmap
-        .into_iter()
-        .map(|(k, v)| (k,v)).collect();
-    cc_sizes
-}
-
-fn collect_singletons(band_sigs: &Vec<PathBuf>, max_lines_per_doc: &DashMap<usize, usize>, config: &MinHashConfig) -> Result<(), Error> {
-    // band_sigs is files with signature entries
-    // max_lines_per_doc maps {doc_id: max(line_nums)} [mutated but not returned]
-    let pbar = build_pbar(band_sigs.len(), "Band Sig Files");
-    let entry_size = config.sig_size + config.path_size + config.line_size;
-    let sig_size = config.sig_size;
-    let line_size = config.line_size;
-    let path_size = config.path_size;
-
-    band_sigs.par_iter().for_each(|path| {
-        let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
-        contents.chunks(entry_size).for_each(|entry| {
-            let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
-            let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();
-            max_lines_per_doc.entry(path_id).and_modify(|e| *e = max(*e, line_id)).or_insert(line_id);
-        });
-        pbar.inc(1)
-    });    
-
-
-    //println!("(Aug) Loaded path data into groups in {:?} secs", aug_start.elapsed().as_secs());
-    Ok(())
-}
-
-
-
-
-fn save_singletons(max_lines_per_doc: DashMap<usize, usize>, singleton_path: &PathBuf) 
-    -> Result<(), Error> {
-    let data: Vec<u8> = max_lines_per_doc
-        .par_iter()
-        .flat_map(|r| {
-            let key_bytes: u64 = (*r.key()) as u64;
-            let val_bytes: u64 = (*r.value()) as u64;
-            vec![key_bytes.to_le_bytes(), val_bytes.to_le_bytes()]
-        })
-        .flat_map(|a| a)
-        .collect();        
-
-    write_mem_to_pathbuf(&data.as_slice(), singleton_path);
-    Ok(())    
-}
 
 fn load_singletons(singleton_path: &PathBuf) -> Result<Vec<(usize, usize)>, Error> {
     let data = read_pathbuf_to_mem(singleton_path).unwrap().into_inner().into_inner();
@@ -970,588 +1022,24 @@ fn parse_kill_file(kill_file: &PathBuf) -> Result<DashMap<usize, Vec<usize>>, Er
 }
 
 
-/*=================================================================
-=                         UF SIZE PRUNE HELPERS                   =
-=================================================================*/
-
-fn load_cc_list(cc_dir: &PathBuf) -> Result<Vec<((usize, usize), usize)>, Error> {
-    // Takes the CC directory and gathers all the files, loads them and then groups objects
-    // according to which CC they belong to 
-    let cc_ext = ".cc.bin";
-    let mut cc_paths = expand_dirs(vec![cc_dir.clone()], Some(&[&cc_ext])).unwrap();
-    cc_paths.sort();
-    
-    // Read the chunks into memory 
-    let data_read_pbar = build_pbar(cc_paths.len(), "CC Chunks (loading)");
-    let cc_chunks: Vec<Vec<u8>> = cc_paths.par_iter().map(|p| {
-        let chunk_contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
-        data_read_pbar.inc(1);
-        chunk_contents
-    }).collect();
-
-    let mut cc_bytes = Vec::new();
-    let cat_pbar = build_pbar(cc_chunks.len(), "CC Chunks (concat2)");
-    for chunk in cc_chunks {
-        cc_bytes.extend(chunk);
-        cat_pbar.inc(1);
-    }
-
-    let ccs = bincode::deserialize(&cc_bytes).unwrap();
-    Ok(ccs)
-}  
 
 
-fn group_docs_by_cc(cc: &Vec<((usize, usize), usize)>) -> DashMap<usize, Vec<(usize, usize)>> {
-    // Maps [((doc_id, line_num), cc_id)] -> {cc_id -> [(doc_id, line_num), ...]}
-    let cc_group: DashMap<usize, Vec<(usize, usize)>> = DashMap::new();
-
-    let cc_pbar = build_pbar(cc.len(), "Docs");
-    cc.into_par_iter()
-        .for_each(|((doc_id, line_num), cc_id)| {
-            cc_group.entry(*cc_id).or_default().push((*doc_id, *line_num));
-            cc_pbar.inc(1);
-        }
-    );
-    cc_group
-}
-
-fn gather_lines_to_live(cc_groups: DashMap<usize, Vec<(usize, usize)>>, floor: usize, ceil: usize) -> DashMap<usize, DashSet<usize>> {
-    // Gathers a collection of (doc_id, line_num) that SURVIVE given the floor and ceil
-    let survivor_pbar = build_pbar(cc_groups.len(), "CCs");
-    let survivors : Vec<(usize, usize)> = cc_groups
-        .into_par_iter()
-        .flat_map(|(_, val)| {
-            let survivors: Vec<(usize, usize)> = if val.len() <= floor {
-                // If cc is <= floor, keep nothing
-                Vec::new()
-            } else if val.len() <= ceil {
-                // If cc is > floor but <= ceil, keep everything
-                val
-            } else {
-                // otherwise randomly select ceil to keep
-                let mut rng = thread_rng();
-                val.choose_multiple(&mut rng, ceil).cloned().collect()
-            };
-            survivor_pbar.inc(1);
-            survivors
-        }).collect();
-
-    // And then group by doc id
-    let grouped_survivors : DashMap<usize, DashSet<usize>> = DashMap::new();
-    let group_pbar = build_pbar(survivors.len(), "Survivors");
-    survivors.into_par_iter()
-        .for_each(|(doc_id, line_num)| {
-            grouped_survivors.entry(doc_id).or_default().insert(line_num);
-            group_pbar.inc(1);
-        });
-    grouped_survivors
-}
-
-fn gather_lines_to_kill_ccs(cc_groups: DashMap<usize, Vec<(usize, usize)>>, floor:usize, ceil:usize) -> 
-    DashMap<usize, DashSet<usize>> 
-{
-    // Gathers a collection of (doc_id, line_num) that should get REMOVED, given the ceil
-    assert!(floor == 0);
-    let ltk_pbar = build_pbar(cc_groups.len(), "CCs");
-    let grouped_ltk : DashMap<usize, DashSet<usize>> = DashMap::new();
-    cc_groups
-        .into_par_iter()
-        .for_each(|(_, v)| {
-            let ltk: Vec<(usize, usize)> = if v.len() < ceil {
-                v
-            } else {
-                let mut rng = thread_rng();
-                v.choose_multiple(&mut rng, v.len() - ceil).cloned().collect::<Vec<(usize, usize)>>()
-            };
-            for (doc_id, line_num) in ltk {
-                grouped_ltk.entry(doc_id).or_default().insert(line_num);
-            }
-            ltk_pbar.inc(1);
-        }
-    );
-    grouped_ltk
-}
 
 /*=================================================================
-=                         ANNOTATE HELPERS                        =
+=                      PHASE 5: CLEAN DUPLICATES                  =
 =================================================================*/
+/* MULTINODE PARALLELISM ON PATHS
+    This cleans the duplicates out from the data. 
+    It simply requires the outputs of the previous steps (namely the FileMap in step 1, and the 
+    .kill.bin files in step 4).
 
-fn build_annotation_lookup(cc_groups: DashMap<usize, Vec<(usize, usize)>>) ->  DashMap<usize, DashMap<usize, usize>> {
-    // Maps {cc_id -> [(doc_id, line_num),...]} to {doc_id -> {line_id: cc_size}}
-    let annotations : DashMap<usize, DashMap<usize, usize>> = DashMap::new();
-    let pbar = build_pbar(cc_groups.len(), "CCs");
+    It will copy over (deduplicated) files from the input_dir to the output_dir (as specified by the config)
 
-    cc_groups.into_par_iter()
-        .for_each(|(cc_id, docvec)| {
-            let cc_size = docvec.len();
-            for (doc_id, line_num) in docvec {
-                annotations.entry(doc_id).or_default().insert(line_num, cc_size);
-            }
-            pbar.inc(1);
-    });
-    annotations
-}
-
-/*=================================================================
-=                         WRITE OUTPUTS                           =
-=================================================================*/
-/*
-Iterates over all paths seen, and removes the lines that we should from each
-If there are no lines to kill, just copy to output
 */
 
 
-fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, output_directory: &PathBuf) -> Result<(usize, usize), Error> {
-    // returns (lines_removed, lines_seen)
-    let line_set: HashSet<usize> = lines_to_kill.into_iter().collect();
-    let data = read_pathbuf_to_mem(path).unwrap();
 
-    let mut output_bytes = Vec::new();
-    let mut line_num = 0;
-    let mut lines_removed = 0;
-    for line in data.lines() {
-        let line = line?;
-        if line_set.contains(&line_num) {
-            lines_removed += 1;
-        } else {
-            output_bytes.extend(line.as_bytes());
-            output_bytes.push(b'\n');
-        }
-
-        line_num += 1;
-    }
-
-    if output_bytes.len() > 0 {
-        let output_filename = output_directory.join(path.clone().file_name().unwrap());
-        write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
-    }
-
-    Ok((lines_removed, line_num))
-}
-
-fn scrub_all_paths(config: &MinHashConfig, lines_to_kill: DashMap<usize, DashSet<usize>>,
-                   output_directory: &PathBuf) -> (usize, usize) {
-    // Iterate over threads with path lookup
-    let documents_seen = AtomicUsize::new(0);
-    let documents_removed = AtomicUsize::new(0);
-    let pbar = build_pbar(config.indices.len(), "Paths");
-    config.indices.par_iter().for_each(|(path,idx)| {
-        let output_filename = get_output_filename(&config.input, path, output_directory);
-        let chopped_lines = lines_to_kill.get(idx).map(|v| v.value().clone());
-        let (path_seen, path_removed) = chop_lines(path, &output_filename, chopped_lines).unwrap();
-        documents_seen.fetch_add(path_seen, Ordering::SeqCst);
-        documents_removed.fetch_add(path_removed, Ordering::SeqCst);
-        pbar.inc(1);
-    });
-
-    (documents_seen.into_inner(), documents_removed.into_inner())
-}
-
-
-fn chop_lines(input_filename: &PathBuf, output_filename: &PathBuf, chop_lines: Option<DashSet<usize>>) -> Result<(usize, usize), Error> {
-    let data = read_pathbuf_to_mem(input_filename).unwrap();
-    let chop_lines: DashSet<usize> = if chop_lines.is_none() {
-        DashSet::new() 
-    } else {
-        chop_lines.unwrap()
-    };
-    let mut lines_seen = 0;
-    let mut lines_removed = 0;
-    let mut output_bytes = Vec::new();
-    let mut line_num = 0;
-
-    for line in data.lines() {
-        let line = line?;
-        lines_seen += 1;
-        if !chop_lines.contains(&line_num) {
-            output_bytes.extend(line.as_bytes());
-            output_bytes.push(b'\n');
-        } else {
-            lines_removed += 1;
-        }
-        line_num += 1;
-    }
-
-    if output_bytes.len() == 0 {
-        return Ok((lines_seen, lines_removed))
-    }
-    write_mem_to_pathbuf(&output_bytes, output_filename).unwrap();
-    Ok((lines_seen, lines_removed))
-
-}
-
-fn scrub_lines_survivors(config: &MinHashConfig, lines_to_survive: DashMap<usize, DashSet<usize>>, 
-                         output_directory: &PathBuf) -> (usize, usize) {
-    let documents_seen = AtomicUsize::new(0);
-    let documents_removed = AtomicUsize::new(0);
-    let pbar = build_pbar(config.indices.len(), "Paths");
-    config.indices.par_iter().for_each(|(path, idx)| {
-        if lines_to_survive.contains_key(idx) {
-            let output_filename = get_output_filename(&config.input, path, output_directory)            ;
-            let survivors = lines_to_survive.get(idx).map(|v| v.value().clone()).unwrap();
-            let (path_seen, path_removed) = keep_survivors(path, &output_filename, survivors).unwrap();
-            documents_seen.fetch_add(path_seen, Ordering::SeqCst);
-            documents_removed.fetch_add(path_removed, Ordering::SeqCst);
-        }
-        pbar.inc(1);
-    });
-    (documents_seen.into_inner(), documents_removed.into_inner())
-}
-
-fn keep_survivors(input_filename: &PathBuf, output_filename: &PathBuf, survivors: DashSet<usize>) -> Result<(usize, usize), Error> {
-    let data = read_pathbuf_to_mem(input_filename).unwrap();
-    let mut lines_seen = 0;
-    let mut lines_removed = 0;
-    let mut output_bytes = Vec::new();
-    let mut line_num = 0;
-    for line in data.lines() {
-        let line = line?;
-        lines_seen += 1;
-        if survivors.contains(&line_num) {
-            output_bytes.extend(line.as_bytes());
-            output_bytes.push(b'\n');            
-        } else {
-            lines_removed += 1;
-        }
-        line_num += 1;
-    }
-    if output_bytes.len() == 0 {
-        return Ok((lines_seen, lines_removed))
-    }
-    write_mem_to_pathbuf(&output_bytes, output_filename).unwrap();
-    Ok((lines_seen, lines_removed))
-}
-
-fn annotate_dataset(config: &MinHashConfig, annotations: DashMap<usize, DashMap<usize, usize>>, output_directory: &PathBuf) -> Result<usize, Error> {
-    let documents_seen = AtomicUsize::new(0);
-    let pbar = build_pbar(config.indices.len(), "Paths");
-    config.indices.par_iter().for_each(|(path, idx)| {
-        let binding = annotations.entry(*idx).or_default();
-        let this_lookup = binding.value();
-        let output_filename = get_output_filename(&config.input, path, output_directory);
-        let this_docs = annotate_path(path, this_lookup, output_filename).unwrap();
-        documents_seen.fetch_add(this_docs, Ordering::SeqCst);
-        pbar.inc(1);
-    });
-    Ok(documents_seen.into_inner())
-}
-
-
-fn annotate_path(input_filename: &PathBuf, lookup: &DashMap<usize, usize>, output: PathBuf) -> Result<usize, Error> {
-    let data = read_pathbuf_to_mem(input_filename).unwrap();
-    let mut line_num = 0;
-    let mut output_bytes = Vec::new();
-    for line in data.lines() {
-        let line = line?;
-        let mut json: Value = serde_json::from_str(&line).unwrap();
-        let cc_size = if lookup.contains_key(&line_num) {
-            *lookup.get(&line_num).unwrap().value()
-        } else {
-            1
-        };
-        json["cc_size"] = json!(cc_size);
-        let json_bytes = serde_json::to_vec(&json).unwrap();
-        output_bytes.extend(json_bytes);
-        output_bytes.push(b'\n');
-        line_num += 1;
-    }
-
-    write_mem_to_pathbuf(&output_bytes, &output).unwrap();
-    Ok(line_num)
-}
-
-
-/*=================================================================
-=                             Subcommands                         =
-=================================================================*/
-
-fn minhash(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_lines_per_path: usize, 
-           sig_storage: &PathBuf, num_bands: u32, band_size: usize, ngram_size: usize) -> Result<(), Error> {
-    // Note: this is only for SMALL runs. We set some hyperparameters for you, and this isn't optimized for these use cases
-    return Ok(());
-
-    /*
-    let config_name = sig_storage.clone().join("config.jsonl.gz");
-
-    build_config(input, &config_name, num_docs, max_lines_per_path).unwrap();
-    hash_only(&config_name, 0, 1, num_bands, band_size, ngram_size, &vec![0 as usize], 1, 32, sig_storage, None).unwrap();
-    finish_dedup(&config_name, sig_storage, output)
-    */
-}
-
-
-fn build_config(input: &Vec<PathBuf>, output: &PathBuf, num_docs: usize, max_lines_per_path: usize,) -> Result<(), Error> {
-    // Build and save the path lookup
-    println!("Building config...");
-    let config = MinHashConfig::new(input, num_docs, max_lines_per_path).unwrap();
-    println!("Collected {:?} paths", config.len());
-    let output = if has_json_extension(output) {
-        output.clone() 
-    } else {
-        output.clone().join("config.json.gz")
-    };
-    config.save(&output)
-}
-
-fn build_file_map(config: &PathBuf) -> Result<(), Error> {
-    /*
-    - Config is the path to the json minhash config
-    This function reads all the files contained in the config.input path and creates a "filemap"
-    which is a .json.gz that stores the 
-    map from {file_name : pathbuf -> file_id : usize}
-    */
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value: serde_json::Value = serde_json::from_reader(config_contents).unwrap();
-
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    create_dir_all(&working_dir).unwrap();
-
-
-    let local_input = PathBuf::from(config_value["local_input"].as_str().unwrap());
-    let remote_input = PathBuf::from(config_value["remote_input"].as_str().unwrap());
-    let file_map = FileMap::new(&local_input, &remote_input).unwrap();
-
-    file_map.save(&working_dir.join("filemap.json.gz"))
-}
-
-
-fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
-    println!("Starting part of Minhash run | config {:?} | chunk {:?}/{:?}", config, path_chunk, num_path_chunks);
-    let start_main = Instant::now();    
-
-    // Initialize everything we need to hash...
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value: serde_json::Value = serde_json::from_reader(config_contents).unwrap();
-
-    // -- Set up hashing stuff
-    let perm_seed: usize = match config_value.get("x") {
-        Some(val) => val.as_u64().unwrap() as usize,
-        None => 0,
-    };    
-    let num_bands = config_value["num_bands"].as_u64().unwrap() as usize;
-    let band_size = config_value["band_size"].as_u64().unwrap() as usize;
-    let tokenizer_str = config_value["tokenizer_str"].as_str().unwrap();
-    let ngram_size = config_value["ngram_size"].as_u64().unwrap() as usize;
-    let band_seeds: Vec<u32> = _expand_band_seeds(&vec![perm_seed as u32], num_bands)
-        .into_iter()
-        .map(|x| x as u32)
-        .collect();
-
-    // -- Get files to hash
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
-    let local_input = file_map.local_input.clone();    
-    let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
-
-    // -- Handle storage stuff
-    let sig_storage = working_dir.clone().join("sig_storage");
-    create_dir_all(&sig_storage);
-    let num_sig_chunks = config_value["num_sig_chunks"].as_u64().unwrap() as usize;
-    let signature_writer = SignatureWriter::new(&sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
-    let path_size = to_byte_size(file_map.indices.len());
-    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
-    let sig_size = compute_sig_size(config_value["num_docs"].as_u64().unwrap() as usize);
-    
-
-    // And then loop through files and hash everything
-    let start_hashing = Instant::now();
-    let total_docs_hashed = AtomicUsize::new(0);    
-    let hash_pbar = build_pbar(this_chunk.len(), "Paths");
-    this_chunk.par_iter().for_each(|(path, path_id)| {
-        let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, band_size, ngram_size, 
-                                       tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size).unwrap();
-        total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
-        hash_pbar.inc(1);
-    });
-    signature_writer.finish().unwrap();
-    println!("(Chunk {:?}) ...collected all hashes in {:?} seconds", path_chunk, start_hashing.elapsed().as_secs());
-    println!("-------------------------");
-    println!("Completing part of Minhash run | config {:?} | chunk {:?}/{:?}", config, path_chunk, num_path_chunks);
-    println!("Computed hashes for {:?} bands, {:?} docs", num_bands, total_docs_hashed.into_inner());
-    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    Ok(())
-}   
-
-
-
-fn finish_dedup(config:&PathBuf, sig_storage: &PathBuf, output: &PathBuf) -> Result<(), Error> {
-    println!("Finishing MinHash run...");
-    let start_main = Instant::now();
-    let config = MinHashConfig::load(config).unwrap();
-
-    // Gather lines to kill
-    let lines_to_kill = aggregate_lines_to_kill(&config, sig_storage).unwrap();
-
-
-    // And then chop all the lines
-    println!("Removing duplicates from pool...");
-    let start_scrub = Instant::now();
-    let (documents_seen, documents_removed) = scrub_all_paths(&config, lines_to_kill, &output);
-    println!("... removed duplicates in {:?} seconds", start_scrub.elapsed().as_secs());
-
-
-    println!("-------------------------");
-    println!("Completing minhash run");
-    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    println!("Saw {:?} documents", documents_seen);
-    println!("Removed {:?} documents", documents_removed);
-    println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
-
-    Ok(())    
-}
-
-fn gather_edges(config: &PathBuf) -> Result<(), Error> {
-    println!("Starting edge gather");
-    let start_main = Instant::now();
-
-    // Load the config and initialize things
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
-    let path_size = to_byte_size(file_map.indices.len());
-    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
-    let sig_size = compute_sig_size(config_value["num_docs"].as_u64().unwrap() as usize);
-
-    // Gather the files into the proper groups (which should live in the same hash-space-universe)
-    let edge_groups = gather_groups(working_dir.clone().join("sig_storage")).unwrap(); //(sigchunk, band_id) -> [(sigfile)]
-    let single_band_id = edge_groups.iter().next().unwrap().key().1;
-    let singleton_map : Option<DashMap<usize, usize>> = Some(DashMap::new()); // maps path_id -> max line_num 
-
-    // Then build the cliques for each group of (sigchunk, band_id) -- across all files!
-    let start_edges = Instant::now();
-
-    println!("Starting edge collection...");
-    let pbar = build_pbar(edge_groups.len(), "Band groups");
-    edge_groups.par_iter()
-        .for_each(|entry| {
-            let (sigchunk, band_id) = entry.key();
-            let singleton_map_opt = if *band_id == single_band_id {
-                &singleton_map
-            } else {
-                &None
-            };
-
-            let band_group = build_band_group(entry.value(), sig_size, path_size, line_size, &singleton_map_opt).unwrap();
-            let output_filename = working_dir.clone()
-                                  .join("edges")
-                                  .join(format!("{:08}", sigchunk))
-                                  .join(format!("{:08}.edges.bin", band_id));
-            save_band_group2(band_group, output_filename, path_size, line_size).unwrap();
-            pbar.inc(1);
-        });
-
-
-    save_singletons(singleton_map.unwrap(), &working_dir.clone().join("edges").join("singletons.bin")).unwrap();
-    println!("... Gathered edges in {:?} seconds", start_edges.elapsed().as_secs());
-    // And save these for future use
-
-    Ok(())
-}
-
-
-
-
-
-
-fn build_edges(config: &PathBuf, sig_storage: &PathBuf, group_storage: &PathBuf) -> Result<(), Error> {
-    /*
-    println!("Building edges...");
-    let start_main = Instant::now();
-    let config = MinHashConfig::load(config).unwrap();
-
-    let start_edges = Instant::now();
-    println!("Starting edge collection...");
-    let band_sigs = _collect_band_sigs(sig_storage).unwrap();
-    let pbar = build_pbar(band_sigs.len(), "Band Groups");
-    band_sigs.par_iter()
-        .for_each(|entry| {
-            let (band_id, sig_chunk) = entry.key();
-            let band_group = build_band_group(entry.value(), config.sig_size, config.path_size, config.line_size).unwrap();
-            save_band_group(band_group, group_storage, *band_id, *sig_chunk).unwrap();
-            pbar.inc(1);
-        });
-    println!("Completed edge building in {:?} seconds", start_edges.elapsed().as_secs());
-
-    let start_singletons = Instant::now();
-    println!("Collecting singletons...");
-    let max_line_per_doc: DashMap<usize, usize> = DashMap::new(); // Maps doc_id -> max line_num
-    if let Some(entry) = band_sigs.iter().next() { // TODO: Can do this with only one band sig (all chunks, only one band)
-        collect_singletons(entry.value(), &max_line_per_doc, &config).unwrap();
-    }
-    save_singletons(max_line_per_doc, &group_storage).unwrap();
-    println!("Collected singletons in {:?} seconds", start_singletons.elapsed().as_secs());
-
-
-    println!("-------------------------");
-    println!("Completed building all edges");
-    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    */
-    Ok(())
-}
-
-fn build_uf2(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
-    // Takes the edges (saved as lists of lists of (path_id, line_num) pairs)
-    // and builds a union find object and then collects CC's and saves a list of ccs.
-    // Unless otherwise specified, also creates a list of to-delete lines, grouped by path_id
-
-
-
-    println!("Building UnionFind...");
-    let start_main = Instant::now();
-
-    // Load the config to initialize things
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
-    let path_size = to_byte_size(file_map.indices.len());
-    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
-
-    // Build the union find and unite all the edges
-    let uf = UFRush::new();
-    let all_edge_files = expand_dirs(vec![working_dir.clone().join("edges")], Some(vec![".edges.bin"].as_slice())).unwrap();
-    let singletons_path = working_dir.clone().join("edges").join("singletons.bin");
-    let singletons = load_singletons(&singletons_path).unwrap();
-
-    add_singletons_to_uf(singletons, &uf, line_size).unwrap();
-    let pbar = build_pbar(all_edge_files.len(), "Edge files");
-    all_edge_files.into_par_iter().for_each(|p| {
-        add_edge_file_to_uf(&p, &uf, path_size, line_size).unwrap();
-        pbar.inc(1);
-    });
-    println!("Built unionfind in {:?} secs", start_main.elapsed().as_secs());
-
-    // Run the cc collection
-    println!("Starting CC Collection");
-    let start_cc = Instant::now();
-    let ccs = build_ccs(uf, line_size);
-    println!("Built ccs in {:?} secs", start_cc.elapsed().as_secs());
-
-    // Save the list of CCs in a writer object thing
-    // First push these into a dashmap and then use the MAXPATH/MAXLINE paradigm
-    println!("Organizing and saving ccs...");
-    let cc_map : DashMap<usize, Vec<(usize, usize)>> = DashMap::new();
-    let pbar = build_pbar(ccs.len(), "CC components");
-    ccs.par_iter().for_each(|((path_id, line_num), key)| {
-        cc_map.entry(*key).or_default().push((*path_id, *line_num));
-        pbar.inc(1);
-    });
-
-    let cc_dir = working_dir.clone().join("ccs");
-    save_all_ccs(&cc_map, &cc_dir, config_value["num_sig_chunks"].as_u64().unwrap() as usize).unwrap();
-        
-    let kill_list = collect_kill_list(cc_map);
-    let kill_dir = working_dir.clone().join("kill");
-    save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
-    println!("Organized and saved ccs in {:?} secs", start_cc.elapsed().as_secs());
-
-
-    println!("Finished all unionfind stuff in {:?} seconds" , start_main.elapsed().as_secs());
-    Ok(())
-}
-
-fn uf_size_prune2(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
+fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
     println!("Starting UF-based pruning...");
     let start_main = Instant::now();
     let config_contents = read_pathbuf_to_mem(config).unwrap();
@@ -1594,111 +1082,58 @@ fn uf_size_prune2(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -
 }
 
 
-fn uf_size_prune(config: &PathBuf, ccs: &PathBuf, output: &PathBuf, floor: usize, ceil:usize) -> Result<(), Error> {
-    println!("Starting UF-based pruning...");
-    let start_main = Instant::now();
-    let config = MinHashConfig::load(config).unwrap();
 
-    println!("Loading CCS...");
-    let start_load_cc = Instant::now();
-    let loaded_ccs = load_cc_list(ccs).unwrap();
-    println!("Loaded CCs in {:?} (s)", start_load_cc.elapsed().as_secs());
+fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, output_directory: &PathBuf) -> Result<(usize, usize), Error> {
+    // returns (lines_removed, lines_seen)
+    let line_set: HashSet<usize> = lines_to_kill.into_iter().collect();
+    let data = read_pathbuf_to_mem(path).unwrap();
 
-    println!("Grouping docs by CC...");
-    let start_group_cc = Instant::now();
-    let groups = group_docs_by_cc(&loaded_ccs);
-    println!("Grouped CCs in {:?} (s)", start_group_cc.elapsed().as_secs());
+    let mut output_bytes = Vec::new();
+    let mut line_num = 0;
+    let mut lines_removed = 0;
+    for line in data.lines() {
+        let line = line?;
+        if line_set.contains(&line_num) {
+            lines_removed += 1;
+        } else {
+            output_bytes.extend(line.as_bytes());
+            output_bytes.push(b'\n');
+        }
 
+        line_num += 1;
+    }
 
-    // Now we have to do some awkward branching:
-    // If floor > 1, can just collect docs to KEEP
-    println!("Starting scrub of dataset...");
-    let start_scrub = Instant::now();
-    let (documents_seen, documents_removed) = if floor > 0 {
-        let grouped_survivors = gather_lines_to_live(groups, floor, ceil);
-        scrub_lines_survivors(&config, grouped_survivors, output)
-    } else {
-        let grouped_ltk = gather_lines_to_kill_ccs(groups, floor, ceil);
-        scrub_all_paths(&config, grouped_ltk, output)
-    };
-    println!("Finished scrubbing dataset in {:?} (s)", start_scrub.elapsed().as_secs());
+    if output_bytes.len() > 0 {
+        let output_filename = output_directory.join(path.clone().file_name().unwrap());
+        write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
+    }
 
-    println!("-------------------------");
-    println!("Completing minhash run");
-    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    println!("Saw {:?} documents", documents_seen);
-    println!("Removed {:?} documents", documents_removed);
-    println!("Document removal rate: {:?}", documents_removed as f64 / documents_seen as f64);
-
-    Ok(())  
+    Ok((lines_removed, line_num))
 }
 
-fn count_docs_from_sigs(config: &PathBuf, sig_storage: &PathBuf) -> Result<(), Error> {
-    println!("Starting counting of docs from sigs");
-    let start_main = Instant::now();
-    let config = MinHashConfig::load(config).unwrap();
 
-    let band_sigs = _collect_band_sigs(sig_storage).unwrap();
-    let sig_files: Vec<PathBuf> = band_sigs.into_iter()
-        .flat_map(|(_,v)| v)
-        .collect();
-    let counter: DashSet<(usize, usize)> = DashSet::new();
-    let pbar = build_pbar(sig_files.len(), "Sig Files");
-    let sig_size = config.sig_size;
-    let path_size = config.path_size;
-    let line_size = config.line_size;
-    sig_files.into_par_iter()
-        .for_each(|p| {
-            let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
-            contents.chunks(sig_size + path_size + line_size)
-                .for_each(|entry| {
-                let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
-                let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();                
-                counter.insert((path_id, line_id));
-            });
-            pbar.inc(1);
-        });
 
-    println!("-------------------------");
-    println!("Completed counting docs from sigs");
-    println!("Number of docs is {:?}", counter.len());
-    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    Ok(())
+/*=================================================================
+=                             Subcommands                         =
+=================================================================*/
 
+fn minhash(config: &PathBuf) -> Result<(), Error> {
+    // Note: this is only for SMALL runs. We set some hyperparameters for you, and this isn't optimized for these use cases
+    return Ok(());
+
+    /*
+    let config_name = sig_storage.clone().join("config.jsonl.gz");
+
+    build_config(input, &config_name, num_docs, max_lines_per_path).unwrap();
+    hash_only(&config_name, 0, 1, num_bands, band_size, ngram_size, &vec![0 as usize], 1, 32, sig_storage, None).unwrap();
+    finish_dedup(&config_name, sig_storage, output)
+    */
 }
 
-fn annotate_cc(config: &PathBuf, ccs: &PathBuf, output: &PathBuf) -> Result<(), Error> {
-    // Adds a 'cc_size' attribute to all jsons and writes them to output 
-    println!("Starting CC Annotation...");
-    let start_main = Instant::now();
-    let config = MinHashConfig::load(config).unwrap();
 
-    println!("Loading CCS...");
-    let start_load_cc = Instant::now();
-    let loaded_ccs = load_cc_list(ccs).unwrap();
-    println!("Loaded CCs in {:?} (s)", start_load_cc.elapsed().as_secs());
 
-    println!("Grouping docs by CC...");
-    let start_group_cc = Instant::now();
-    let groups = group_docs_by_cc(&loaded_ccs);
-    println!("Grouped CCs in {:?} (s)", start_group_cc.elapsed().as_secs());
 
-    println!("Building annotation lookup...");
-    let start_annotation_lookup = Instant::now();
-    let annotations = build_annotation_lookup(groups);
-    println!("Built annotation lookup in {:?} (s)", start_annotation_lookup.elapsed().as_secs());
 
-    println!("Annotating dataset");
-    let start_annotate = Instant::now();
-    let num_docs = annotate_dataset(&config, annotations, output).unwrap();
-    println!("Annotation finished in {:?} (s)", start_annotate.elapsed().as_secs());
-
-    println!("-------------------------");
-    println!("Completing CC Annotation");
-    println!("Annotated {:?} docs", num_docs);
-    println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
-    Ok(())    
-}
 
 
 /*=================================================================
@@ -1713,48 +1148,24 @@ fn main() {
     }
 
     let result = match &args.command {
-        Commands::MinHash {input, output, num_docs, max_lines_per_path, sig_storage, num_bands, band_size, ngram_size} => {
-            minhash(input, output, *num_docs, *max_lines_per_path, sig_storage, *num_bands, *band_size, *ngram_size)
-        }
+
 
         Commands::BuildFileMap{config} => {
             build_file_map(config)
         }
-        Commands::BuildConfig {input, output, num_docs, max_lines_per_path} => {
-            build_config(input, output, *num_docs, *max_lines_per_path)
-        },
 
 
         Commands::HashOnly {config, path_chunk, num_path_chunks} => {
             hash_only(config, *path_chunk, *num_path_chunks)
         },
 
-        Commands::GatherEdges {config} => {
-            gather_edges(config)
-        }
-
-        Commands::Finish {config, sig_storage, output} => {
-            finish_dedup(config, sig_storage, output)        
-        },
-
-        Commands::BuildEdges {config, sig_storage, group_storage} => {
-            build_edges(config, sig_storage, group_storage)
-        },
-
         Commands::BuildUf {config, num_path_chunks} => {
-            build_uf2(config, *num_path_chunks)
+            build_uf(config, *num_path_chunks)
         },
 
-        Commands::UfSizePrune {config, ccs, output, floor, ceil} => {
-            uf_size_prune(config, ccs, output, *floor, *ceil)
-        },
-        Commands::AnnotateCc {config, ccs, output} => {
-            annotate_cc(config, ccs, output)
-        },
-
-        Commands::CountDocsFromSigs {config, sig_storage} => {
-            count_docs_from_sigs(config, sig_storage)
-        },
+        Commands::UfSizePrune {config, path_chunk, num_path_chunks} => {
+            uf_size_prune(config, *path_chunk, *num_path_chunks)
+        }
 
         _ => {Ok(())}
 
