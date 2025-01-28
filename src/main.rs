@@ -4,10 +4,9 @@ use std::io::Write;
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use glob::glob;
-use serde::{Serialize, Deserialize};
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher, DefaultHasher};
-use anyhow::{Result, Error, anyhow};
+use anyhow::{Result, Error};
 use std::path::{PathBuf};
 use std::io::{BufRead};
 use rand::prelude::*;
@@ -22,7 +21,7 @@ use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
 use clap::{Parser, Subcommand};
 use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
-use crate::storage::{IntValueEnum, SignatureWriter, GenWriter, MinHashConfig, FileMap, to_byte_size, compute_sig_size};
+use crate::storage::{IntValueEnum, SignatureWriter, GenWriter, FileMap, to_byte_size, compute_sig_size};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,12 +36,8 @@ pub mod io;
 pub mod storage;
 pub mod uf_rush2;
 
-
 const BIG_PRIME: u64 = 18446744073709551557;
-
-const MERSENNE_PRIME: u64 = (1 << 61) - 1;
 const MAX_HASH: u64 = (1 << 32) - 1;
-const CC_CHUNK_SIZE: usize = usize::MAX; //100 * 1024 * 1024; // 100 MB chunk size
 
 
 /*
@@ -211,6 +206,11 @@ enum Commands {
 
         #[arg(long, default_value_t=1)]
         num_path_chunks: usize
+    },
+
+    TrueJacc {
+        #[arg(required=true, long)]
+        config: PathBuf
     }
 
 }
@@ -389,6 +389,44 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
         }
     }
     Ok(docs_hashed)
+}
+
+fn process_path_set(path: &PathBuf, path_id: usize, ngram_size: usize, tokenizer_str: &str, tokensets: &DashMap<(usize, usize), HashSet<usize>>) -> Result<(), Error> {
+    let data = read_pathbuf_to_mem(path).unwrap();
+
+    let tokenizer = load_tokenizer(tokenizer_str).unwrap();
+    for (line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        let json: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));        
+        let text = json["text"].as_str().unwrap();
+        let Ok(tokens) = catch_unwind(|| preprocess_text(text, &tokenizer)) else {
+            println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num);
+            continue;
+        };
+        let mut ngram: VecDeque<usize> = VecDeque::with_capacity(ngram_size);
+        let mut ngram_count = 0;
+        let mut doc_ngrams : HashSet<usize> = HashSet::new();
+        for token in tokens {
+            ngram.push_back(token);
+            if ngram.len() >= ngram_size {
+                ngram_count += 1;
+                doc_ngrams.insert(hash_object(&ngram));
+                ngram.pop_front();
+            }
+        }
+        if ngram_count == 0 {
+            doc_ngrams.insert(hash_object(&ngram));
+        }
+        tokensets.insert((path_id, line_num), doc_ngrams);
+    }
+    Ok(())
+}
+
+
+fn hash_object<T: Hash>(obj: &T) -> usize {
+    let mut hasher = DefaultHasher::new();
+    obj.hash(&mut hasher);
+    hasher.finish() as usize
 }
 
 
@@ -941,6 +979,52 @@ fn save_all_ccs(cc_map: &DashMap<usize,Vec<(usize, usize)>>, cc_dir: &PathBuf, n
 }
 
 
+fn load_all_ccs(cc_dir: &PathBuf) -> Result<DashMap<usize, Vec<(usize, usize)>>, Error> {
+
+    let all_ccs: DashMap<usize, Vec<(usize,usize)>> = DashMap::new();
+    let cc_paths = expand_dirs(vec![cc_dir.clone()], Some(vec![".cc.bin"].as_slice())).unwrap();
+    let cc_id = AtomicUsize::new(0);
+    let pbar = build_pbar(cc_paths.len(), "CC Files");
+
+    cc_paths.par_iter().for_each(|p| {
+        _load_single_cc(p, &all_ccs, &cc_id).unwrap();
+        pbar.inc(1);
+    });
+
+    Ok(all_ccs)
+}
+
+
+
+fn _load_single_cc(path: &PathBuf, all_ccs: &DashMap<usize, Vec<(usize, usize)>>, cc_id: &AtomicUsize) -> Result<(), Error> {
+
+    let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
+    let chunk_size = 8 * 2; // 2x u64's
+    let max_u64_bytes = u64::MAX.to_le_bytes();
+    let terminus: Vec<u8> = vec![max_u64_bytes, max_u64_bytes].into_iter().flat_map(|a| a).collect();
+    let current_cc = 0;
+
+    let mut last_chunk = terminus.clone();
+    contents.chunks_exact(chunk_size).for_each(|c| {
+        let current_cc = if last_chunk == terminus {
+            cc_id.fetch_add(1, Ordering::SeqCst)
+        } else {
+            current_cc
+        };
+        last_chunk = c.to_vec();
+        let path_id = u64::from_le_bytes(c[..8].try_into().unwrap()) as usize;
+        let doc_id = u64::from_le_bytes(c[8..].try_into().unwrap()) as usize;
+
+        if c != terminus {
+            all_ccs.entry(current_cc).or_default().push((path_id, doc_id));
+        }
+    });
+
+    
+    Ok(())
+}
+
+
 fn collect_kill_list(cc_map: DashMap<usize, Vec<(usize, usize)>>) -> DashMap<usize, Vec<usize>> {
     // Creates map of path_id -> [line_num,...] for lines to remove from doc 
     let pbar = build_pbar(cc_map.len(), "Organizing kill ccs");
@@ -1114,23 +1198,144 @@ fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, output_directory: &Path
 
 
 /*=================================================================
-=                             Subcommands                         =
+=                              Optional Analytics                 =
+=================================================================*/
+/*
+Some optional analytics calls.
+
+get_true_jacc_small: computes the actual jaccard similarity between all pairs of
+                     documents in each connected component. 
+
+    Saves outputs as a json list of lists:
+    - each list represents a connected component
+    - each element in each list is a (path_id_0, line_id_0, path_id_1, line_id_1, jaccard_sim)
+
+*/
+fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
+
+    let start_main = Instant::now();
+    println!("Starming true jaccard similarity calculations");
+    let config_contents = read_pathbuf_to_mem(config).unwrap();
+    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
+    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();        
+    let cc_dir = working_dir.clone().join("ccs");
+
+    // First load all ccs into memory and collect which files we have to load 
+    println!("Loading cc's");
+    let start_cc_load = Instant::now();
+    let ccs = load_all_ccs(&cc_dir).unwrap();
+    println!("Loaded ccs in {:?} secs", start_cc_load.elapsed().as_secs());
+
+
+    // Then load all data that we need 
+    println!("Starting path data load...");
+    let start_path_load = Instant::now();
+    // -- first collect the path ids we need
+    let path_ids: DashSet<usize> = DashSet::new();
+    ccs.par_iter().for_each(|entry| {
+        let value = entry.value();
+        for el in value {
+            path_ids.insert(el.0);
+        }
+    });
+    // -- and get  the path_id -> pathbuf lookup
+    let reverse_path_indices: DashMap<usize, PathBuf> = DashMap::new();
+    file_map.indices.iter().for_each(|entry| {
+        reverse_path_indices.insert(entry.1.clone(), entry.0.clone());
+    });
+    
+    // -- then load the data and get (path_id, line_num) -> ngram_set for all data
+    let pbar = build_pbar(path_ids.len(), "Path ids");
+    let tokensets: DashMap<(usize, usize), HashSet<usize>> = DashMap::new();    
+    path_ids.into_par_iter().for_each(|p_id| {
+        let path = reverse_path_indices.get(&p_id).unwrap();
+        process_path_set(&path, 
+                         p_id, 
+                         config_value["ngram_size"].as_u64().unwrap() as usize, 
+                         config_value["tokenizer_str"].as_str().unwrap(),
+                         &tokensets).unwrap();
+        pbar.inc(1);
+    });
+
+    // -- and group it by cc
+    let cc_ngrams : DashMap<usize, Vec<HashSet<usize>>> = DashMap::new();
+    ccs.into_par_iter().for_each(|entry| {
+        let cc_id = entry.0;
+        for doc_id in entry.1 {
+            let ngram_set = tokensets.remove(&doc_id).unwrap().1;
+            cc_ngrams.entry(cc_id).or_default().push(ngram_set);
+        }
+    });
+    println!("Loaded all path data in {:?} secs", start_path_load.elapsed().as_secs());
+
+
+    // Then get all pairwise cc distances
+    println!("Starting pairwise checks...");
+    let start_pairwise = Instant::now();
+    let pairwise_jacs = collect_pairwise_jaccards(cc_ngrams);
+    println!("Got all pairwise distances in {:?} secs", start_pairwise.elapsed().as_secs());
+
+    // Then save pairwise jaccard similarities
+    println!("Saving pairwise similarities");
+    let start_save = Instant::now();
+    let pairwise_values: Vec<Vec<f32>> = pairwise_jacs.into_par_iter()
+        .map(|entry| entry.1)
+        .collect();
+    let pairwise_path = working_dir.clone().join("jaccard_values.json.gz");
+    let pairwise_values_json = serde_json::to_vec(&pairwise_values).unwrap();
+    write_mem_to_pathbuf(&pairwise_values_json, &pairwise_path).unwrap(); 
+    println!("Saved pairwise similarities in {:?} secs", start_save.elapsed().as_secs());
+
+    println!("Collected all true jaccard similarities in {:?} secs", start_main.elapsed().as_secs());
+    Ok(())
+}
+
+
+fn collect_pairwise_jaccards(cc_ngrams: DashMap<usize, Vec<HashSet<usize>>>) -> DashMap<usize, Vec<f32>> {
+    let pairwise_jacs: DashMap<usize, Vec<f32>> = DashMap::new();
+    cc_ngrams.into_par_iter().for_each(|entry| {
+        let cc_id = entry.0;
+        for i in 0..entry.1.len() {
+            for j in (i+1)..entry.1.len() {
+                let sim = jaccard_similarity(&entry.1[i], &entry.1[j]);
+                pairwise_jacs.entry(cc_id).or_default().push(sim);
+
+            }
+        }
+    });
+
+    pairwise_jacs
+}
+
+
+fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
+    let cap = x.intersection(y).count();
+    let cup = x.union(y).count();   
+    cap as f32 / cup as f32
+}
+
+
+
+
+
+
+/*=================================================================
+=                             Aggregate commands                  =
 =================================================================*/
 
 fn minhash(config: &PathBuf) -> Result<(), Error> {
     // Note: this is only for SMALL runs. We set some hyperparameters for you, and this isn't optimized for these use cases
-    return Ok(());
 
-    /*
-    let config_name = sig_storage.clone().join("config.jsonl.gz");
+    build_file_map(&config).unwrap();
+    hash_only(&config, 0, 1).unwrap();
+    gather_edges(&config).unwrap();
+    build_uf(&config, 1).unwrap();
+    uf_size_prune(&config, 0, 1).unwrap();
 
-    build_config(input, &config_name, num_docs, max_lines_per_path).unwrap();
-    hash_only(&config_name, 0, 1, num_bands, band_size, ngram_size, &vec![0 as usize], 1, 32, sig_storage, None).unwrap();
-    finish_dedup(&config_name, sig_storage, output)
-    */
+    Ok(())
+
 }
-
-
 
 
 
@@ -1139,6 +1344,7 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
 /*=================================================================
 =                                 MAIN                            =
 =================================================================*/
+
 
 fn main() {
     let args = ArgParser::parse();
@@ -1159,13 +1365,23 @@ fn main() {
             hash_only(config, *path_chunk, *num_path_chunks)
         },
 
+        Commands::GatherEdges {config} => {
+            gather_edges(config)
+        },
+
         Commands::BuildUf {config, num_path_chunks} => {
             build_uf(config, *num_path_chunks)
         },
 
         Commands::UfSizePrune {config, path_chunk, num_path_chunks} => {
             uf_size_prune(config, *path_chunk, *num_path_chunks)
+        },
+
+        Commands::TrueJacc {config} => {
+            get_true_jacc_small(config)
         }
+
+
 
         _ => {Ok(())}
 

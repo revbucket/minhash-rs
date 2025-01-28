@@ -17,7 +17,6 @@ We will ONLY ever be concerned about files that have extensions of:
 Compression schemes will always be inferred from extension
 */
 
-use std::fs;
 use std::fs::create_dir_all;
 use std::fs::File;
 use crate::s3::{get_reader_from_s3, expand_s3_dir, write_cursor_to_s3};
@@ -32,7 +31,6 @@ use std::io::{BufReader, Cursor, Write, Read};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use zstd::stream::write::Encoder as ZstdEncoder;
-use rayon::prelude::*;
 
 const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst", ".json.gz"];
 
