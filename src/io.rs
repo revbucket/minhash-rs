@@ -19,11 +19,9 @@ Compression schemes will always be inferred from extension
 
 use std::fs::create_dir_all;
 use std::fs::File;
-use crate::s3::{get_reader_from_s3, expand_s3_dir, write_cursor_to_s3};
 use anyhow::Error;
 use anyhow::anyhow;
 use std::path::PathBuf;
-use crate::s3::is_s3;
 use glob::glob;
 use flate2::read::MultiGzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
@@ -43,23 +41,14 @@ const VALID_EXTS: &[&str] = &[".jsonl", ".jsonl.gz", ".jsonl.zstd", ".jsonl.zst"
 
 pub(crate) fn expand_dirs(paths: Vec<PathBuf>, manual_ext: Option<&[&str]>) -> Result<Vec<PathBuf>, Error> {
     // For local directories -> does a glob over each directory to get all files with given extension
-    // For s3 directories -> does an aws s3 ls to search for files
     let exts = if !manual_ext.is_none() {
     	manual_ext.unwrap()
     } else {
     	VALID_EXTS
     };
     let mut files: Vec<PathBuf> = Vec::new();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
     for path in paths {
-        if is_s3(path.clone()) {
-            // Use async_std to block until we scour the s3 directory for files
-            runtime.block_on(async {
-                let s3_paths = expand_s3_dir(&path, exts).await.unwrap();
-                files.extend(s3_paths);                
-            });                
-        }
-        else if path.is_dir() {
+        if path.is_dir() {
             let path_str = path
                 .to_str()
                 .ok_or_else(|| anyhow!("invalid path '{}'", path.to_string_lossy()))?;
@@ -100,22 +89,9 @@ pub fn has_json_extension(path: &PathBuf) -> bool {
 
 pub(crate) fn read_pathbuf_to_mem(input_file: &PathBuf) -> Result<BufReader<Cursor<Vec<u8>>>, Error> {
     // Generic method to read local or s3 file into memory
-    let reader = if is_s3(input_file) {
-        let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();   
-        match rt.block_on(get_reader_from_s3(input_file, Some(5))) {
-            Ok(result) => result,
-            Err(err) => {
-                eprintln!("Error! {:?}", err);
-                return Err(err.into());
-            }
-        }
-    } else {
-        let contents = read_local_file_into_memory(input_file).expect("Failed to read contents into memory");
-        BufReader::new(contents)
-    };
+    let contents = read_local_file_into_memory(input_file).expect("Failed to read contents into memory");
+    let reader = BufReader::new(contents);
+
     Ok(reader)
 } 
 
@@ -149,38 +125,12 @@ fn read_local_file_into_memory(input_file: &PathBuf) ->Result<Cursor<Vec<u8>>, E
 =                          Writing files                             =
 ====================================================================*/
 
-pub(crate) fn get_output_filename(inputs: &[PathBuf], input_filename: &PathBuf, output_directory: &PathBuf) -> PathBuf {
-    // More fancy output-file naming that no longer assumes unique inputs
-    let matching_prefix = inputs
-        .iter()
-        .find(|pfx| input_filename.starts_with(pfx))
-        .expect("No matching prefix found?!?");
-    let relative_path = input_filename.strip_prefix(matching_prefix).unwrap();
-    output_directory.clone().join(relative_path)
-}
-
-
 pub(crate) fn write_mem_to_pathbuf(contents: &[u8], output_file: &PathBuf) -> Result<(), Error> {
 	let compressed_data = compress_data(contents.to_vec(), output_file);
-    if is_s3(output_file) {
-        let cursor = Cursor::new(compressed_data);
-        let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();   
-        match rt.block_on(write_cursor_to_s3(&output_file, cursor)) {
-            Ok(result) => result,
-            Err(err) => {
-                eprintln!("Error! {:?}", err);
-                return Err(err.into());
-            }
-        };
-    } else {
-        if let Some(parent_dir) = output_file.parent() {
+    if let Some(parent_dir) = output_file.parent() {
             if !parent_dir.exists() {
                 create_dir_all(parent_dir).unwrap()
              }
-        }        
         let mut file = File::create(output_file).expect(format!("Unable to create output file {:?}", output_file).as_str());
         file.write_all(&compressed_data).expect(format!("Unable to write to {:?}", output_file).as_str());
 

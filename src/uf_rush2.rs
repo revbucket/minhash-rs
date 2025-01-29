@@ -23,6 +23,7 @@ pub(crate) struct UFRush {
 }
 
 /// Implementation block for the UFRush struct.
+#[allow(dead_code)]
 impl UFRush {
     /// Creates a new union-find data structure with a specified number of elements.
     ///

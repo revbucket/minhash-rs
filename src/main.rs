@@ -12,6 +12,7 @@ use std::io::{BufRead};
 use rand::prelude::*;
 use tiktoken_rs::{p50k_base, CoreBPE};
 use serde_json::Value;
+use serde_yaml;
 use regex::Regex;
 use ndarray::{Array1};
 use rand::{Rng, SeedableRng};
@@ -31,13 +32,13 @@ use std::panic::catch_unwind;
 use std::fs::create_dir_all;
 use std::option::Option;
 
-pub mod s3;
 pub mod io;
 pub mod storage;
 pub mod uf_rush2;
 
 const BIG_PRIME: u64 = 18446744073709551557;
-const MAX_HASH: u64 = (1 << 32) - 1;
+const BIG_PRIME_128 : u128 = BIG_PRIME as u128;
+const MAX_HASH: u64 = BIG_PRIME;
 
 
 /*
@@ -232,6 +233,7 @@ fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
 }
 
 
+
 /*=================================================================
 =                      PHASE 1: BUILD FILE MAP                    =
 =================================================================*/
@@ -255,7 +257,7 @@ fn build_file_map(config: &PathBuf) -> Result<(), Error> {
     map from {file_name : pathbuf -> file_id : usize}
     */
     let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value: serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let config_value: serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
 
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
     create_dir_all(&working_dir).unwrap();
@@ -301,7 +303,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
 
     // Initialize everything we need to hash...
     let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value: serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let config_value: serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
 
     // -- Set up hashing stuff
     let perm_seed: usize = match config_value.get("x") {
@@ -331,6 +333,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let path_size = to_byte_size(file_map.indices.len());
     let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
     let sig_size = compute_sig_size(config_value["num_docs"].as_u64().unwrap() as usize);
+    let content_key = config_value["content_key"].as_str().unwrap();
     
 
     // And then loop through files and hash everything
@@ -339,7 +342,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let hash_pbar = build_pbar(this_chunk.len(), "Paths");
     this_chunk.par_iter().for_each(|(path, path_id)| {
         let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, band_size, ngram_size, 
-                                       tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size).unwrap();
+                                       tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size, &content_key).unwrap();
         total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
         hash_pbar.inc(1);
     });
@@ -355,7 +358,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
 
 fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size: usize, ngram_size: usize,
                  tokenizer_str: &str, signature_writer: &SignatureWriter, num_sig_chunks: usize,
-                 path_size: usize, line_size: usize, sig_size: usize) -> Result<usize, Error> {
+                 path_size: usize, line_size: usize, sig_size: usize, content_key: &str) -> Result<usize, Error> {
     // Setup things: load data, build tokenizer, etc
     let data = read_pathbuf_to_mem(path).unwrap();
     // let mut buffer = Vec::new();
@@ -372,13 +375,14 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
         let line = line.unwrap();
         docs_hashed += 1;
         let json: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num.as_usize()));
-        let text = json["text"].as_str().unwrap();
+        let text = json[content_key].as_str().unwrap();
 
         let Ok(tokens) = catch_unwind(|| preprocess_text(text, &tokenizer)) else {
             println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num);
             continue;
         };
         let hash_vals = get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size);
+
         let bands = hash_vals.into_shape((num_bands, band_size)).unwrap();
         for (row, band_seed) in bands.rows().into_iter().zip(band_seeds.iter()) {
             let mut hasher = Sha256::new(); 
@@ -465,6 +469,7 @@ fn clean_text(text: &str) -> String {
 fn get_hash_vals_from_tokens(tokens: Vec<usize>, perm_seeds: &Vec<u64>, ngram_size: usize) -> Array1<u64> {
     let (a,b) = _init_permutations(perm_seeds);
     let n = perm_seeds.len();
+
     let mut hash_vals = Array1::ones(n) * MAX_HASH;
     let mut ngram: VecDeque<usize> = VecDeque::with_capacity(ngram_size);
     let mut ngram_count = 0; 
@@ -500,16 +505,39 @@ fn _init_permutations(seeds: &Vec<u64>) -> (Array1<u64>, Array1<u64>) {
     (a,b)    
 }
 
+#[allow(dead_code)]
+fn rand_u64s(seed: u64, output_size: usize) -> Vec<u64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut output: Vec<u64> = Vec::new();
+    for _i in 0..output_size {
+        output.push(rng.gen::<u64>());
+    }
+    output
+}
+
+
+fn _hash_deque(deque: &VecDeque<usize>, hash_a: &Vec<u64>, hash_b: &Vec<u64>) -> u64 {
+    let mut hash_val: u128 = 0;
+    let mut idx = 0;
+    for entry in deque.iter() {
+        hash_val += ((*entry as u128 * hash_a[idx] as u128) % BIG_PRIME_128 + hash_b[idx] as u128) % BIG_PRIME_128;
+        idx += 1;
+    }
+
+    hash_val as u64
+}
+
 
 fn _update_hash_vals(mut hash_vals: Array1<u64>, a: &Array1<u64>, b: &Array1<u64>, ngram: &VecDeque<usize>) -> Array1<u64> {
     // hash ngram and do the minhash update
     let mut hasher = DefaultHasher::new();
     ngram.hash(&mut hasher);
-    let cur_hash = hasher.finish();
+    let cur_hash = hasher.finish() % BIG_PRIME;
     let mut phv = a.clone();
-    // next line is: (a * cur_hash + b) % P [wrap on overflow]
-    phv.zip_mut_with(&b, |x, y| *x = mod_add(mod_mul(*x, cur_hash, BIG_PRIME), *y, BIG_PRIME));
+    phv.zip_mut_with(&b, |x, y| *x = ((((*x as u128 * cur_hash as u128) % BIG_PRIME_128) + *y as u128) % BIG_PRIME_128) as u64);
+
     hash_vals.zip_mut_with(&phv, |x, y| *x = std::cmp::min(*x, *y));
+
     hash_vals
 
 }
@@ -537,38 +565,6 @@ fn _save_band_signature_to_disk(signature_writer: &SignatureWriter, band_seed: u
     Ok(())
 }
 
-fn mod_mul(a: u64, b: u64, modulus: u64) -> u64 {
-    let mut result = 0;
-    let mut a = a % modulus;
-    let mut b = b % modulus;
-    
-    while b > 0 {
-        if b & 1 != 0 {
-            result = (result + a) % modulus;
-        }
-        a = (a << 1) % modulus;
-        b >>= 1;
-    }
-    
-    result
-}
-
-fn mod_add(a: u64, b: u64, modulus: u64) -> u64 {
-    let a = a % modulus;
-    let b = b % modulus;
-    
-    // Add and take modulus
-    // If a + b would overflow, we can do it this way:
-    if modulus - a <= b {
-        // If we get here, then a + b would wrap around the modulus
-        // So we calculate: (a + b) mod m = (a - (m - b)) mod m
-        let difference = b - (modulus - a);
-        difference % modulus
-    } else {
-        // Normal case where a + b doesn't wrap
-        (a + b) % modulus
-    }
-}
 
 
 /*=================================================================
@@ -615,7 +611,7 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
 
     // Load the config and initialize things
     let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_size = to_byte_size(file_map.indices.len());
@@ -648,7 +644,6 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
             save_band_group(band_group, output_filename, path_size, line_size).unwrap();
             pbar.inc(1);
         });
-
 
     save_singletons(singleton_map.unwrap(), &working_dir.clone().join("edges").join("singletons.bin")).unwrap();
     println!("... Gathered edges in {:?} seconds", start_main.elapsed().as_secs());
@@ -822,7 +817,7 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
 
     // Load the config to initialize things
     let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_size = to_byte_size(file_map.indices.len());
@@ -859,6 +854,7 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     });
 
     let cc_dir = working_dir.clone().join("ccs");
+    println!("CC DIR {:?}", cc_dir);
     save_all_ccs(&cc_map, &cc_dir, config_value["num_sig_chunks"].as_u64().unwrap() as usize).unwrap();
         
     let kill_list = collect_kill_list(cc_map);
@@ -986,7 +982,7 @@ fn load_all_ccs(cc_dir: &PathBuf) -> Result<DashMap<usize, Vec<(usize, usize)>>,
     let cc_id = AtomicUsize::new(0);
     let pbar = build_pbar(cc_paths.len(), "CC Files");
 
-    cc_paths.par_iter().for_each(|p| {
+    cc_paths.iter().for_each(|p| {
         _load_single_cc(p, &all_ccs, &cc_id).unwrap();
         pbar.inc(1);
     });
@@ -1002,22 +998,21 @@ fn _load_single_cc(path: &PathBuf, all_ccs: &DashMap<usize, Vec<(usize, usize)>>
     let chunk_size = 8 * 2; // 2x u64's
     let max_u64_bytes = u64::MAX.to_le_bytes();
     let terminus: Vec<u8> = vec![max_u64_bytes, max_u64_bytes].into_iter().flat_map(|a| a).collect();
-    let current_cc = 0;
 
     let mut last_chunk = terminus.clone();
+    let mut cur_cc : Vec<(usize, usize)> = Vec::new();
     contents.chunks_exact(chunk_size).for_each(|c| {
-        let current_cc = if last_chunk == terminus {
-            cc_id.fetch_add(1, Ordering::SeqCst)
-        } else {
-            current_cc
-        };
         last_chunk = c.to_vec();
         let path_id = u64::from_le_bytes(c[..8].try_into().unwrap()) as usize;
         let doc_id = u64::from_le_bytes(c[8..].try_into().unwrap()) as usize;
-
-        if c != terminus {
-            all_ccs.entry(current_cc).or_default().push((path_id, doc_id));
+        if c == terminus {
+            let cc_name = cc_id.fetch_add(1, Ordering::SeqCst);
+            all_ccs.entry(cc_name).or_default().extend(cur_cc.clone());
+            cur_cc = Vec::new();
+        } else {
+            cur_cc.push((path_id, doc_id));
         }
+
     });
 
     
@@ -1127,8 +1122,9 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
     println!("Starting UF-based pruning...");
     let start_main = Instant::now();
     let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
+    let input_dir = PathBuf::from(config_value["local_input"].as_str().unwrap());
     let output_dir = PathBuf::from(config_value["output_dir"].as_str().unwrap());
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);
@@ -1146,19 +1142,20 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
     let start_kill_clean = Instant::now();
     let documents_removed = AtomicUsize::new(0);
     let documents_seen = AtomicUsize::new(0);
+
     let pbar = build_pbar(path_chunk_files.len(), "Files to clean");
     path_chunk_files.par_iter().for_each(|(path, path_id)| {
         let lines_to_kill = kill_list.entry(*path_id).or_default();
-        let (remove, seen) = clean_path(path, lines_to_kill.to_vec(), &output_dir).unwrap();        
+        let (remove, seen) = clean_path(&input_dir.clone().join(path), lines_to_kill.to_vec(), &input_dir, &output_dir).unwrap();        
         documents_removed.fetch_add(remove, Ordering::SeqCst);
         documents_seen.fetch_add(seen, Ordering::SeqCst);
         pbar.inc(1);
     });
-    println!("Cleaned documents in {:?} secs", start_kill_clean.elapsed());
+    println!("Cleaned documents in {:?} secs", start_kill_clean.elapsed().as_secs());
 
     let documents_seen = documents_seen.into_inner();
     let documents_removed = documents_removed.into_inner();
-    println!("Pruned data in {:?} secs", start_main.elapsed());
+    println!("Pruned data in {:?} secs", start_main.elapsed().as_secs());
     println!("Saw {:?} lines", documents_seen);
     println!("Removed {:?} lines", documents_removed);
     println!("Removal rate was {:?}", (documents_removed as f32) / (documents_seen as f32));
@@ -1166,11 +1163,20 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
 }
 
 
+fn get_output_filename(input_path: &PathBuf, config_input_dir: &PathBuf, config_output_dir: &PathBuf) -> Result<PathBuf, Error> {
+    let replaced = input_path.clone()
+        .strip_prefix(config_input_dir)
+        .ok()
+        .map(|stripped| config_output_dir.clone().join(stripped)).unwrap();
+    Ok(replaced)
+}
 
-fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, output_directory: &PathBuf) -> Result<(usize, usize), Error> {
+
+fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathBuf, output_directory: &PathBuf) -> Result<(usize, usize), Error> {
     // returns (lines_removed, lines_seen)
     let line_set: HashSet<usize> = lines_to_kill.into_iter().collect();
     let data = read_pathbuf_to_mem(path).unwrap();
+
 
     let mut output_bytes = Vec::new();
     let mut line_num = 0;
@@ -1188,7 +1194,7 @@ fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, output_directory: &Path
     }
 
     if output_bytes.len() > 0 {
-        let output_filename = output_directory.join(path.clone().file_name().unwrap());
+        let output_filename = get_output_filename(path, input_directory, output_directory).unwrap();
         write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
     }
 
@@ -1216,7 +1222,8 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
     let start_main = Instant::now();
     println!("Starming true jaccard similarity calculations");
     let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_json::Value = serde_json::from_reader(config_contents).unwrap();
+    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
+    let local_input = PathBuf::from(config_value["local_input"].as_str().unwrap());
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();        
     let cc_dir = working_dir.clone().join("ccs");
@@ -1225,6 +1232,7 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
     println!("Loading cc's");
     let start_cc_load = Instant::now();
     let ccs = load_all_ccs(&cc_dir).unwrap();
+    println!("CCS {:?}", ccs);
     println!("Loaded ccs in {:?} secs", start_cc_load.elapsed().as_secs());
 
 
@@ -1249,7 +1257,7 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
     let pbar = build_pbar(path_ids.len(), "Path ids");
     let tokensets: DashMap<(usize, usize), HashSet<usize>> = DashMap::new();    
     path_ids.into_par_iter().for_each(|p_id| {
-        let path = reverse_path_indices.get(&p_id).unwrap();
+        let path = local_input.clone().join(reverse_path_indices.get(&p_id).unwrap().clone());
         process_path_set(&path, 
                          p_id, 
                          config_value["ngram_size"].as_u64().unwrap() as usize, 
@@ -1279,6 +1287,7 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
     // Then save pairwise jaccard similarities
     println!("Saving pairwise similarities");
     let start_save = Instant::now();
+    println!("PAIRWISE SIMS {:?}", pairwise_jacs);
     let pairwise_values: Vec<Vec<f32>> = pairwise_jacs.into_par_iter()
         .map(|entry| entry.1)
         .collect();
@@ -1354,11 +1363,13 @@ fn main() {
     }
 
     let result = match &args.command {
-
+        Commands::MinHash{config} => {
+            minhash(config)
+        }
 
         Commands::BuildFileMap{config} => {
             build_file_map(config)
-        }
+        },
 
 
         Commands::HashOnly {config, path_chunk, num_path_chunks} => {

@@ -537,7 +537,7 @@ impl SignatureWriter {
 	pub fn new(storage_loc: &PathBuf, band_ids: Vec<u32>, num_sig_chunks: usize, path_chunk: usize) -> Self {
 		let writer : DashMap<(u32, usize), Arc<Mutex<BufWriter<File>>>> = DashMap::new();
 		// Create writers into |band_ids|
-		println!("NEED TO OPEN {:?} FILES", band_ids.len() * num_sig_chunks);
+		println!("Opening {:?} signature files", band_ids.len() * num_sig_chunks);
 		for band_id in &band_ids {
 			for sig_chunk in 0..num_sig_chunks {
 				let filename = SignatureWriter::get_filename(storage_loc, *band_id, sig_chunk, path_chunk);
@@ -605,6 +605,7 @@ impl SignatureWriter {
 
 pub struct GenWriter {
 	pub writer: DashMap<usize, Arc<Mutex<BufWriter<File>>>>,
+	#[allow(dead_code)]
 	storage_loc: PathBuf,
 	num_chunks: usize,
 }
@@ -613,7 +614,7 @@ impl GenWriter {
 	pub fn new(storage_loc: &PathBuf, num_chunks: usize, subext: &str) -> Self {
 		let writer : DashMap<usize, Arc<Mutex<BufWriter<File>>>> = DashMap::new();
 		// Create writers
-		println!("NEED TO OPEN {:?} FILES", num_chunks);
+		println!("Opening {:?} writer files", num_chunks);
 		for chunk in 0..num_chunks {
 			let filename = GenWriter::get_filename(storage_loc, chunk, subext);
 			if let Some(parent_dir) = filename.parent() {
@@ -639,7 +640,7 @@ impl GenWriter {
 
 	pub fn get_filename(storage_loc: &PathBuf, chunk: usize, subext: &str) -> PathBuf {
 		storage_loc.clone()
-			.join(format!("chunk_{:08}.{:?}.bin", chunk, subext))
+			.join(format!("chunk_{:08}.{}.bin", chunk, subext))
 	}
 
 
