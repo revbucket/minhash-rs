@@ -400,7 +400,13 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
     let perm_seeds = _expand_band_seeds(&band_seeds, band_size);
     let path_id = IntValueEnum::new(path_id, path_size);
     let mut docs_hashed = 0;
-    for (line_num, line) in data.lines().enumerate() {
+
+    //let num_lines = data.lines().count();
+
+    let data_lines : Vec<_> = data.lines().into_iter().collect();
+
+    let pbar = build_pbar(data_lines.len(), "Lines");
+    for (line_num, line) in data_lines.into_iter().enumerate() {
 
         let line_num = IntValueEnum::new(line_num, line_size);
         let line = line.unwrap();
@@ -422,6 +428,7 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
             let band_signature = IntValueEnum::from_bytes(hash[..sig_size].to_vec(), sig_size);   
             _save_band_signature_to_disk(&signature_writer, *band_seed, band_signature, path_id.clone(), line_num.clone(), num_sig_chunks).unwrap();
         }
+        pbar.inc(1);
     }
     Ok(docs_hashed)
 }
