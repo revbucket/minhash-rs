@@ -38,10 +38,7 @@ def list_s3_files(bucket_name, prefix, contains=None):
     return file_list
 
 
-
-@click.command()
-@click.option('--config', required=True, help='Path to config.yaml file')
-def build_file_map(config: str):
+def clickfree_build_file_map(config: str):
     config_data = yaml.safe_load(open(config, 'r'))
 
     working_dir = config_data['working_dir']
@@ -52,12 +49,19 @@ def build_file_map(config: str):
     file_map_loc = os.path.join(working_dir, 'filemap.json.gz')
     file_map_contents = {'local_input': config_data['local_input'],
                         'remote_input': config_data['remote_input'],
-                        'indices': {p.replace(config_data['remote_input'], '') : i for i,p in enumerate(files)}}
+                        'indices': {p.replace(config_data['remote_input'], '').lstrip('/') : i for i,p in enumerate(files)}}
 
 
     with open(file_map_loc, 'wb') as f:
         f.write(json.dumps(file_map_contents).encode('utf-8'))
 
+
+
+
+@click.command()
+@click.option('--config', required=True, help='Path to config.yaml file')
+def build_file_map(config: str):
+    return clickfree_build_file_map(config)
 
 if __name__ == '__main__':
     build_file_map()

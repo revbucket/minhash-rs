@@ -20,6 +20,7 @@ use rand_chacha::ChaCha20Rng;
 use sha2::{Sha256, Digest};
 use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
+use unicode_segmentation::UnicodeSegmentation;
 use clap::{Parser, Subcommand};
 use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
 use crate::storage::{IntValueEnum, SignatureWriter, GenWriter, FileMap, to_byte_size, compute_sig_size};
@@ -232,6 +233,36 @@ fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
     pbar
 }
 
+struct OmniTokenizer {
+    tokenizer_name: String,
+    inner: CoreBPE
+}
+
+impl OmniTokenizer {
+    fn new(tokenizer_name: &str) -> Result<Self, Error> {
+        Ok(OmniTokenizer { tokenizer_name: tokenizer_name.to_string(), inner: p50k_base().unwrap()})
+    }
+
+    fn encode(&self, text: &str) -> Vec<usize> {
+        match self.tokenizer_name.as_str() {
+            "p50k" => {
+                self.inner.encode_with_special_tokens(text)
+            }
+            "uniseg" => {
+                text.split_word_bounds().map(|w| {
+                    let mut hasher = DefaultHasher::new();
+                    w.hash(&mut hasher);
+                    hasher.finish() as usize
+                }).collect()
+            },
+            _ => { // default to character level
+                text.bytes().map(|b| b as usize).collect()
+            },
+        }
+    }
+
+}
+
 
 
 /*=================================================================
@@ -364,7 +395,7 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
     // let mut buffer = Vec::new();
     // data.read_to_end(&mut buffer).unwrap();
     // println!("READ DATA {:?}", buffer);
-    let tokenizer = load_tokenizer(tokenizer_str).unwrap();
+    let tokenizer = OmniTokenizer::new(tokenizer_str).unwrap();
     let num_bands = band_seeds.len();
     let perm_seeds = _expand_band_seeds(&band_seeds, band_size);
     let path_id = IntValueEnum::new(path_id, path_size);
@@ -398,7 +429,7 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
 fn process_path_set(path: &PathBuf, path_id: usize, ngram_size: usize, tokenizer_str: &str, tokensets: &DashMap<(usize, usize), HashSet<usize>>) -> Result<(), Error> {
     let data = read_pathbuf_to_mem(path).unwrap();
 
-    let tokenizer = load_tokenizer(tokenizer_str).unwrap();
+    let tokenizer = OmniTokenizer::new(tokenizer_str).unwrap();
     for (line_num, line) in data.lines().enumerate() {
         let line = line.unwrap();
         let json: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));        
@@ -434,17 +465,11 @@ fn hash_object<T: Hash>(obj: &T) -> usize {
 }
 
 
-fn load_tokenizer(tokenizer_name: &str) -> Result<CoreBPE, Error> {
-    match tokenizer_name {
-        "p50k" => Ok(p50k_base().unwrap()),
-        _ => panic!("Unknown tokenizer {:?}", tokenizer_name)
-    }
-}
 
-fn preprocess_text(text: &str, tokenizer: &CoreBPE) -> Vec<usize> {
-    // Clean text and then tokenize
+fn preprocess_text(text: &str, tokenizer: &OmniTokenizer) -> Vec<usize> 
+{
     let text = clean_text(text);
-    tokenizer.encode_with_special_tokens(&text)
+    tokenizer.encode(&text)
 }
 
 
@@ -1125,7 +1150,7 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
     let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
     let input_dir = PathBuf::from(config_value["local_input"].as_str().unwrap());
-    let output_dir = PathBuf::from(config_value["output_dir"].as_str().unwrap());
+    let output_dir = PathBuf::from(config_value["local_output"].as_str().unwrap());
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);
     let kill_dir = working_dir.clone().join("kill");
