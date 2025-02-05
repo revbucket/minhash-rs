@@ -354,7 +354,8 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let local_input = file_map.local_input.clone();    
-    let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
+    let mut this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
+    this_chunk.truncate(4);
 
     // -- Handle storage stuff
     let sig_storage = working_dir.clone().join("sig_storage");
@@ -371,6 +372,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let start_hashing = Instant::now();
     let total_docs_hashed = AtomicUsize::new(0);    
     let hash_pbar = build_pbar(this_chunk.len(), "Paths");
+
     this_chunk.par_iter().for_each(|(path, path_id)| {
         let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, band_size, ngram_size, 
                                        tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size, &content_key).unwrap();
@@ -549,10 +551,6 @@ fn rand_u64s(seed: u64, output_size: usize) -> Vec<u64> {
 
 
 fn _hash_deque(deque: &VecDeque<usize>, hash_a: &Vec<u64>, hash_b: &Vec<u64>) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    deque.hash(&mut hasher);
-    return hasher.finish();
-
     let mut hash_val: u128 = 0;
     let mut idx = 0;
     for entry in deque.iter() {
