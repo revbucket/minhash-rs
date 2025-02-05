@@ -23,7 +23,7 @@ tar = "0.4.40"
 uuid = {version ="1.8.0", features = ["v4", "fast-rng", "macro-diagnostics"]}
 indicatif = "0.17.8"
 flate2 = "1.0"
-serde = "1.0.198"
+serde = { version = "1.0.198", features = ["derive"]}
 tiktoken-rs = "0.5.8"
 base64 = "0.22.1"
 rustc-hash = "1.1.0"
@@ -40,3 +40,4 @@ human_bytes = "0.4.3"
 byteorder = "1.5.0"
 serde_yaml = "0.9.34"
 unicode-segmentation = "1.12.0"
+ahash = "0.8.11"

@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use glob::glob;
 use std::collections::VecDeque;
-use std::hash::{Hash, Hasher, DefaultHasher};
+use std::hash::{Hash, Hasher, DefaultHasher, BuildHasher};
 use anyhow::{Result, Error};
 use std::path::{PathBuf};
 use std::io::{BufRead};
@@ -33,6 +33,13 @@ use std::panic::catch_unwind;
 use std::fs::create_dir_all;
 use std::option::Option;
 
+use ahash::RandomState;
+
+//use xxhash_rust::xxh3::xxh3_128;
+//use xxhash_rust::xxh3::Xxh3;
+
+
+
 pub mod io;
 pub mod storage;
 pub mod uf_rush2;
@@ -40,7 +47,6 @@ pub mod uf_rush2;
 const BIG_PRIME: u64 = 18446744073709551557;
 const BIG_PRIME_128 : u128 = BIG_PRIME as u128;
 const MAX_HASH: u64 = BIG_PRIME;
-
 
 /*
 New plan:
@@ -526,14 +532,14 @@ fn get_hash_vals_from_tokens(tokens: Vec<usize>, perm_seeds: &Vec<u64>, ngram_si
     
 
 
-fn _init_permutations(seeds: &Vec<u64>) -> (Array1<u64>, Array1<u64>) {
+fn _init_permutations(seeds: &Vec<u64>) -> (Array1<u128>, Array1<u64>) {
     // Initialize the permutations needed for each minhash
     let n = seeds.len();
     let mut a = Array1::zeros(n);
     let mut b = Array1::zeros(n);    
     for (i, &seed) in seeds.iter().enumerate() {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
-        a[i] = rng.gen();
+        a[i] = rng.gen::<u128>() as u128;
         b[i] = rng.gen();
     }
     (a,b)    
@@ -561,16 +567,27 @@ fn _hash_deque(deque: &VecDeque<usize>, hash_a: &Vec<u64>, hash_b: &Vec<u64>) ->
     hash_val as u64
 }
 
+fn hash_vecdeque<T: Hash>(deque: &VecDeque<T>) -> u128 {
+    // Use two 64-bit hashes to create a 128-bit hash
+    let hash_a = RandomState::with_seed(123);
+    let hash_b = RandomState::with_seed(456);
+    let hash_val_a = hash_a.hash_one(deque);
+    let hash_val_b = hash_b.hash_one(deque);
+    ((hash_val_a as u128) << 64) | (hash_val_b as u128)
+}
 
-fn _update_hash_vals(mut hash_vals: Array1<u64>, a: &Array1<u64>, b: &Array1<u64>, ngram: &VecDeque<usize>) -> Array1<u64> {
+
+
+fn _update_hash_vals(mut hash_vals: Array1<u64>, a: &Array1<u128>, b: &Array1<u64>, ngram: &VecDeque<usize>) -> Array1<u64> {
     // hash ngram and do the minhash update
-    let mut hasher = DefaultHasher::new();
-    ngram.hash(&mut hasher);
-    let cur_hash = hasher.finish() % BIG_PRIME;
-    let mut phv = a.clone();
 
-    phv.zip_mut_with(&b, |x, y| *x = (x.wrapping_mul(cur_hash)).wrapping_add(*y) % BIG_PRIME);
-    // phv.zip_mut_with(&b, |x, y| *x = ((((*x as u128 * cur_hash as u128) % BIG_PRIME_128) + *y as u128) % BIG_PRIME_128) as u64);
+
+    let cur_hash = hash_vecdeque(ngram);
+    let phv: Array1<u64> = a.mapv(|x| (x.wrapping_mul(cur_hash) >> 64) as u64);
+
+    //phv.zip_mut_with(&b |x, y| *x = ((x.wrapping_mul(cur_hash)) >> 64) as u64);
+
+
 
     hash_vals.zip_mut_with(&phv, |x, y| *x = std::cmp::min(*x, *y));
 
