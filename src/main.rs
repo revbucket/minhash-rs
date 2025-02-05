@@ -45,7 +45,6 @@ pub mod storage;
 pub mod uf_rush2;
 
 const BIG_PRIME: u64 = 18446744073709551557;
-const BIG_PRIME_128 : u128 = BIG_PRIME as u128;
 const MAX_HASH: u64 = BIG_PRIME;
 
 /*
@@ -507,7 +506,7 @@ fn clean_text(text: &str) -> String {
 }
 
 fn get_hash_vals_from_tokens(tokens: Vec<usize>, perm_seeds: &Vec<u64>, ngram_size: usize) -> Array1<u64> {
-    let (a,b) = _init_permutations(perm_seeds);
+    let a = _init_permutations(perm_seeds);
     let n = perm_seeds.len();
 
     let mut hash_vals = Array1::ones(n) * MAX_HASH;
@@ -517,12 +516,12 @@ fn get_hash_vals_from_tokens(tokens: Vec<usize>, perm_seeds: &Vec<u64>, ngram_si
         ngram.push_back(token);
         if ngram.len() >= ngram_size {
             ngram_count += 1;
-            hash_vals = _update_hash_vals(hash_vals, &a, &b, &ngram);
+            hash_vals = _update_hash_vals(hash_vals, &a, &ngram);
             ngram.pop_front();
         }
     }
     hash_vals = if ngram_count == 0 {
-        _update_hash_vals(hash_vals, &a, &b, &ngram) // short document, still wanna hash it
+        _update_hash_vals(hash_vals, &a, &ngram) // short document, still wanna hash it
     } else {
         hash_vals
     };
@@ -532,17 +531,15 @@ fn get_hash_vals_from_tokens(tokens: Vec<usize>, perm_seeds: &Vec<u64>, ngram_si
     
 
 
-fn _init_permutations(seeds: &Vec<u64>) -> (Array1<u128>, Array1<u64>) {
+fn _init_permutations(seeds: &Vec<u64>) -> Array1<u128> {
     // Initialize the permutations needed for each minhash
     let n = seeds.len();
     let mut a = Array1::zeros(n);
-    let mut b = Array1::zeros(n);    
     for (i, &seed) in seeds.iter().enumerate() {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         a[i] = rng.gen::<u128>() as u128;
-        b[i] = rng.gen();
     }
-    (a,b)    
+    a
 }
 
 #[allow(dead_code)]
@@ -556,39 +553,17 @@ fn rand_u64s(seed: u64, output_size: usize) -> Vec<u64> {
 }
 
 
-fn _hash_deque(deque: &VecDeque<usize>, hash_a: &Vec<u64>, hash_b: &Vec<u64>) -> u64 {
-    let mut hash_val: u128 = 0;
-    let mut idx = 0;
-    for entry in deque.iter() {
-        hash_val += ((*entry as u128 * hash_a[idx] as u128) % BIG_PRIME_128 + hash_b[idx] as u128) % BIG_PRIME_128;
-        idx += 1;
-    }
+fn _update_hash_vals(mut hash_vals: Array1<u64>, a: &Array1<u128>, ngram: &VecDeque<usize>) -> Array1<u64> {
 
-    hash_val as u64
-}
-
-fn hash_vecdeque<T: Hash>(deque: &VecDeque<T>) -> u128 {
-    // Use two 64-bit hashes to create a 128-bit hash
+    // hash the vecdeque as a u128 
     let hash_a = RandomState::with_seed(123);
     let hash_b = RandomState::with_seed(456);
-    let hash_val_a = hash_a.hash_one(deque);
-    let hash_val_b = hash_b.hash_one(deque);
-    ((hash_val_a as u128) << 64) | (hash_val_b as u128)
-}
+    let hash_val_a = hash_a.hash_one(ngram);
+    let hash_val_b = hash_b.hash_one(ngram);
+    let cur_hash = ((hash_val_a as u128) << 64) | (hash_val_b as u128);
 
-
-
-fn _update_hash_vals(mut hash_vals: Array1<u64>, a: &Array1<u128>, b: &Array1<u64>, ngram: &VecDeque<usize>) -> Array1<u64> {
-    // hash ngram and do the minhash update
-
-
-    let cur_hash = hash_vecdeque(ngram);
+    // then multiply by a (mod 2^128) and take top 64 most significant bits
     let phv: Array1<u64> = a.mapv(|x| (x.wrapping_mul(cur_hash) >> 64) as u64);
-
-    //phv.zip_mut_with(&b |x, y| *x = ((x.wrapping_mul(cur_hash)) >> 64) as u64);
-
-
-
     hash_vals.zip_mut_with(&phv, |x, y| *x = std::cmp::min(*x, *y));
 
     hash_vals
