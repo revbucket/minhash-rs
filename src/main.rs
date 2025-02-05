@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use glob::glob;
 use std::collections::VecDeque;
-use std::hash::{Hash, Hasher, DefaultHasher, BuildHasher};
+use std::hash::{Hash, Hasher, DefaultHasher};
 use anyhow::{Result, Error};
 use std::path::{PathBuf};
 use std::io::{BufRead};
@@ -359,8 +359,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let local_input = file_map.local_input.clone();    
-    let mut this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
-    this_chunk.truncate(4);
+    let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
 
     // -- Handle storage stuff
     let sig_storage = working_dir.clone().join("sig_storage");
