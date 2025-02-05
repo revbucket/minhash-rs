@@ -549,6 +549,10 @@ fn rand_u64s(seed: u64, output_size: usize) -> Vec<u64> {
 
 
 fn _hash_deque(deque: &VecDeque<usize>, hash_a: &Vec<u64>, hash_b: &Vec<u64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    deque.hash(&mut hasher);
+    return hasher.finish();
+
     let mut hash_val: u128 = 0;
     let mut idx = 0;
     for entry in deque.iter() {
