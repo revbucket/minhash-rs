@@ -568,7 +568,9 @@ fn _update_hash_vals(mut hash_vals: Array1<u64>, a: &Array1<u64>, b: &Array1<u64
     ngram.hash(&mut hasher);
     let cur_hash = hasher.finish() % BIG_PRIME;
     let mut phv = a.clone();
-    phv.zip_mut_with(&b, |x, y| *x = ((((*x as u128 * cur_hash as u128) % BIG_PRIME_128) + *y as u128) % BIG_PRIME_128) as u64);
+
+    phv.zip_mut_with(&b, |x, y| *x = (x.wrapping_mul(cur_hash)).wrapping_add(*y) % BIG_PRIME);
+    // phv.zip_mut_with(&b, |x, y| *x = ((((*x as u128 * cur_hash as u128) % BIG_PRIME_128) + *y as u128) % BIG_PRIME_128) as u64);
 
     hash_vals.zip_mut_with(&phv, |x, y| *x = std::cmp::min(*x, *y));
 
