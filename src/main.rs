@@ -376,6 +376,12 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     } else {
         None
     };
+    let exact_override: bool = if let Some(exact) = config_value.get("exact") {
+        exact.as_bool().unwrap()
+    } else {
+        false
+    };
+
 
     // And then loop through files and hash everything
     let start_hashing = Instant::now();
@@ -384,7 +390,8 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
 
     this_chunk.par_iter().for_each(|(path, path_id)| {
         let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, band_size, ngram_size, 
-                                       tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size, &content_key, concat_key).unwrap();
+                                       tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size, &content_key, 
+                                       concat_key, exact_override).unwrap();
         total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
         hash_pbar.inc(1);
     });
@@ -401,7 +408,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
 fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size: usize, ngram_size: usize,
                  tokenizer_str: &str, signature_writer: &SignatureWriter, num_sig_chunks: usize,
                  path_size: usize, line_size: usize, sig_size: usize, content_key: &str,
-                 concat_key: Option<&str>) -> Result<usize, Error> {
+                 concat_key: Option<&str>, exact_override: bool) -> Result<usize, Error> {
     // Setup things: load data, build tokenizer, etc
     let data = read_pathbuf_to_mem(path).unwrap();
     // let mut buffer = Vec::new();
@@ -436,11 +443,19 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
     for (k,v) in line_groups.into_iter() {
         let line_num = IntValueEnum::new(k, line_size);
         let text = v.join("\n");
-        let Ok(tokens) = catch_unwind(|| preprocess_text(&text, &tokenizer)) else {
-            println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num.as_usize());
-            continue;
+        let hash_vals = if exact_override {
+            let Ok(tokens) = catch_unwind(|| preprocess_text(&text, &tokenizer)) else {
+                println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num.as_usize());
+                continue;
+            };
+            get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size)
+        } else {
+            let n = perm_seeds.len();
+            let mut hash_vals: Array1<u64>  = Array1::ones(n);
+            hash_vals = hash_vals * (hash_object(&text) as u64);
+            hash_vals
         };
-        let hash_vals = get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size);
+        
         groups_hashed += 1;
 
         let bands = hash_vals.into_shape((num_bands, band_size)).unwrap();
@@ -455,6 +470,7 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
     Ok(groups_hashed)
     
 }
+
 
 fn process_path_set(path: &PathBuf, path_id: usize, ngram_size: usize, tokenizer_str: &str, tokensets: &DashMap<(usize, usize), HashSet<usize>>) -> Result<(), Error> {
     let data = read_pathbuf_to_mem(path).unwrap();
