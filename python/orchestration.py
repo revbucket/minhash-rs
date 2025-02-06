@@ -9,6 +9,7 @@ import json
 
 import s5cmd_part_generator as spg
 import file_map_builder as fmb
+import ray
 
 VERBOSE = True
 
@@ -156,6 +157,11 @@ def call_hash_only(config_dict, part_id=0, num_parts=1):
 	upload_and_clean(config_dict, "sig_storage")
 
 
+@ray.remote
+def ray_hash_only(config_dict, part_id=0, num_parts=1):
+	call_hash_only(config_dict, part_id=part_id, num_parts=num_parts)
+
+
 def call_gather_edges(config_dict):
 	""" Makes the rust call to go from hashes to edges.
 		Uploads the edge data to s3 and cleans up local dir when done 
@@ -177,6 +183,11 @@ def call_gather_edges(config_dict):
 
 	# Finally upload and clean up 
 	upload_and_clean(config_dict, "edges")
+
+
+@ray.remote
+def ray_gather_edges(config_dict):
+	call_gather_edges(config_dict)
 
 
 def call_build_uf(config_dict, num_parts=1):
@@ -201,6 +212,10 @@ def call_build_uf(config_dict, num_parts=1):
 	upload_and_clean(config_dict, "ccs")
 	upload_and_clean(config_dict, "kill")
 
+
+@ray.remote
+def ray_build_uf(config_dict, num_parts=1):
+	call_build_uf(config_dict, num_parts=num_parts)
 
 
 def call_uf_size_prune(config_dict, path_chunk_id=0, num_path_chunks=1):
@@ -233,6 +248,10 @@ def call_uf_size_prune(config_dict, path_chunk_id=0, num_path_chunks=1):
 		sb_run(rm_call)
 
 
+@ray.remote
+ray_uf_size_prune(config_dict, path_chunk_id=path_chunk_id, num_path_chunks=num_path_chunks):
+	call_uf_size_prune(config_dict, path_chunk_id=path_chunk_id, num_path_chunks=num_path_chunks)
+
 
 
 # ================================================
@@ -243,15 +262,23 @@ def call_uf_size_prune(config_dict, path_chunk_id=0, num_path_chunks=1):
 
 def main(remote_config):
 
-	# Init ray and do setup 
+	# Init ray and do setup 	
+	ray.init(address="auto")
 	config_dict = yaml.safe_load(open(remote_config, 'rb').read())
 	shared_file_setup(config_dict)
+	call_build_file_map(config_dict)
 
+	# Do all steps
+	num_path_chunks = config_dict['num_path_chunks']
+	hash_futures = [ray_hash_only.remote(config_dict, path_chunk=i, num_path_chunks=num_path_chunks)
+					for i in range(num_path_chunks)]
+	ray.get(hash_futures)
 
-	# Do all the steps
-	call_build_file_map(config_dict, local_sys=True)
-	call_hash_only(config_dict)
-	call_
+	ray.get(ray_gather_edges.remote(config_dict))
 
+	ray.get(ray_build_uf.remote(ray_build_uf, num_path_chunks))
 
-	# Init 
+	prune_futures = [ray_uf_size_prune.remote(config_dict, path_chunk=i, num_path_chunks=num_path_chunks)
+					 for i in range(num_path_chunks)]
+	ray.get(prune_futures)
+
