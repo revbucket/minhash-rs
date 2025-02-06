@@ -1253,7 +1253,6 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
     println!("Loading cc's");
     let start_cc_load = Instant::now();
     let ccs = load_all_ccs(&cc_dir).unwrap();
-    println!("CCS {:?}", ccs);
     println!("Loaded ccs in {:?} secs", start_cc_load.elapsed().as_secs());
 
 

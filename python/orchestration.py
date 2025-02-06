@@ -248,9 +248,10 @@ def main(remote_config):
 	shared_file_setup(config_dict)
 
 
-	# Build the file map
+	# Do all the steps
 	call_build_file_map(config_dict, local_sys=True)
-
+	call_hash_only(config_dict)
+	call_
 
 
 	# Init 
