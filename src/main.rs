@@ -286,10 +286,20 @@ fn get_concat_val(obj: &Value, concat_key: &Vec<String>) -> Result<Vec<String>, 
     let mut concat_val: Vec<String> = Vec::new();
 
     for k in concat_key {
-        concat_val.push(obj.get(k).unwrap().as_str().unwrap().to_string());
+        concat_val.push(get_nested_json_val(obj, k).unwrap());
     }
 
     Ok(concat_val)
+}
+
+
+fn get_nested_json_val(obj: &Value, key: &String) -> Result<String, Error> {
+    let mut current = obj;
+    for subkey in key.split('.') {
+        current = current.get(subkey).unwrap();
+    }
+
+    Ok(current.to_string())
 }
 
 
