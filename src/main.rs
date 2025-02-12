@@ -1,45 +1,39 @@
-
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::io::Write;
-use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
+// External crates
+use ahash::RandomState;
+use anyhow::{Error, Result};
+use clap::{Parser, Subcommand};
+use dashmap::{DashMap, DashSet};
 use glob::glob;
-use std::collections::VecDeque;
-use std::hash::{Hash, Hasher, DefaultHasher};
-use anyhow::{Result, Error};
-use std::path::{PathBuf};
-use std::io::{BufRead};
+use indicatif::{ProgressBar, ProgressStyle};
+use ndarray::Array1;
 use rand::prelude::*;
-use tiktoken_rs::{p50k_base, CoreBPE};
-use serde_json::Value;
-use serde_yaml;
-use regex::Regex;
-use ndarray::{Array1};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use sha2::{Sha256, Digest};
-use dashmap::{DashMap, DashSet};
 use rayon::prelude::*;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use serde_yaml;
+use sha2::{Digest, Sha256};
+use tiktoken_rs::{CoreBPE, p50k_base};
 use unicode_segmentation::UnicodeSegmentation;
-use clap::{Parser, Subcommand};
-use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
-use crate::storage::{IntValueEnum, SignatureWriter, GenWriter, FileMap, to_byte_size, compute_sig_size};
-use indicatif::{ProgressBar, ProgressStyle};
-use std::time::Instant;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::uf_rush2::UFRush;
-use std::panic::catch_unwind;
-use std::fs::create_dir_all;
+// Standard library
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{create_dir_all, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{BufRead, Write};
 use std::option::Option;
+use std::os::unix::fs::OpenOptionsExt;
+use std::panic::catch_unwind;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
-use ahash::RandomState;
-
-//use xxhash_rust::xxh3::xxh3_128;
-//use xxhash_rust::xxh3::Xxh3;
-
-
+// Internal crate imports
+use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
+use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
+use crate::uf_rush2::UFRush;
 
 pub mod io;
 pub mod storage;
@@ -224,6 +218,54 @@ enum Commands {
 }
 
 /*=================================================================
+=                             CONFIG                              =
+=================================================================*/
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    name: String,
+    // Minhash parameters
+    num_bands: usize,
+    band_size: usize,
+    ngram_size: usize,
+    tokenizer_str: String,
+    #[serde(default)]
+    hash_seed: usize,
+
+    // Engineery things
+    num_sig_chunks: usize,
+    num_docs: usize,
+    max_lines_per_path: usize,
+    content_key: String,
+
+    // Local directories
+    local_input: PathBuf,
+    working_dir: PathBuf,
+    output_dir: PathBuf,
+
+    // Remote directories
+    remote_input: PathBuf,
+    remote_working_dir: PathBuf,
+    remote_output: PathBuf,
+
+    // Fancy options
+    #[serde(default)]
+    exact_override: bool,
+    #[serde(default)]
+    concat_key: Option<Vec<String>>
+
+}
+
+fn read_config(config_path: &PathBuf) -> Result<Config, Error> {
+    let contents = read_pathbuf_to_mem(config_path).unwrap();
+    let config: Config = serde_yaml::from_reader(contents).unwrap();
+    Ok(config)
+}
+
+
+
+
+/*=================================================================
 =                             UTILITIES                           =
 =================================================================*/
 
@@ -238,6 +280,18 @@ fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
     pbar.inc(0);
     pbar
 }
+
+
+fn get_concat_val(obj: &Value, concat_key: &Vec<String>) -> Result<Vec<String>, Error> {
+    let mut concat_val: Vec<String> = Vec::new();
+
+    for k in concat_key {
+        concat_val.push(obj.get(k).unwrap().as_str().unwrap().to_string());
+    }
+
+    Ok(concat_val)
+}
+
 
 struct OmniTokenizer {
     tokenizer_name: String,
@@ -339,25 +393,16 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let start_main = Instant::now();    
 
     // Initialize everything we need to hash...
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value: serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
+    let config_obj = read_config(config).unwrap();
 
     // -- Set up hashing stuff
-    let perm_seed: usize = match config_value.get("x") {
-        Some(val) => val.as_u64().unwrap() as usize,
-        None => 0,
-    };    
-    let num_bands = config_value["num_bands"].as_u64().unwrap() as usize;
-    let band_size = config_value["band_size"].as_u64().unwrap() as usize;
-    let tokenizer_str = config_value["tokenizer_str"].as_str().unwrap();
-    let ngram_size = config_value["ngram_size"].as_u64().unwrap() as usize;
-    let band_seeds: Vec<u32> = _expand_band_seeds(&vec![perm_seed as u32], num_bands)
+    let band_seeds: Vec<u32> = _expand_band_seeds(&vec![config_obj.hash_seed as u32], config_obj.num_bands)
         .into_iter()
         .map(|x| x as u32)
         .collect();
 
     // -- Get files to hash
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
+    let working_dir = config_obj.working_dir;
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let local_input = file_map.local_input.clone();    
     let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
@@ -365,22 +410,11 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     // -- Handle storage stuff
     let sig_storage = working_dir.clone().join("sig_storage");
     create_dir_all(&sig_storage).unwrap();
-    let num_sig_chunks = config_value["num_sig_chunks"].as_u64().unwrap() as usize;
+    let num_sig_chunks = config_obj.num_sig_chunks;
     let signature_writer = SignatureWriter::new(&sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
     let path_size = to_byte_size(file_map.indices.len());
-    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
-    let sig_size = compute_sig_size(config_value["num_docs"].as_u64().unwrap() as usize);
-    let content_key = config_value["content_key"].as_str().unwrap();
-    let concat_key = if let Some(concat_key) = config_value.get("concat_key") {
-        Some(concat_key.as_str().unwrap())
-    } else {
-        None
-    };
-    let exact_override: bool = if let Some(exact) = config_value.get("exact") {
-        exact.as_bool().unwrap()
-    } else {
-        false
-    };
+    let line_size = to_byte_size(config_obj.max_lines_per_path);
+    let sig_size = compute_sig_size(config_obj.num_docs);
 
 
     // And then loop through files and hash everything
@@ -389,9 +423,9 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let hash_pbar = build_pbar(this_chunk.len(), "Paths");
 
     this_chunk.par_iter().for_each(|(path, path_id)| {
-        let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, band_size, ngram_size, 
-                                       tokenizer_str, &signature_writer, num_sig_chunks, path_size, line_size, sig_size, &content_key, 
-                                       concat_key, exact_override).unwrap();
+        let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, config_obj.band_size, config_obj.ngram_size, 
+                                       config_obj.tokenizer_str.as_str(), &signature_writer, config_obj.num_sig_chunks, path_size, line_size, sig_size, &config_obj.content_key, 
+                                       &config_obj.concat_key.clone(), config_obj.exact_override).unwrap();
         total_docs_hashed.fetch_add(docs_hashed, Ordering::SeqCst);
         hash_pbar.inc(1);
     });
@@ -399,7 +433,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     println!("(Chunk {:?}) ...collected all hashes in {:?} seconds", path_chunk, start_hashing.elapsed().as_secs());
     println!("-------------------------");
     println!("Completing part of Minhash run | config {:?} | chunk {:?}/{:?}", config, path_chunk, num_path_chunks);
-    println!("Computed hashes for {:?} bands, {:?} docs", num_bands, total_docs_hashed.into_inner());
+    println!("Computed hashes for {:?} bands, {:?} docs", config_obj.num_bands, total_docs_hashed.into_inner());
     println!("Total runtime: {:?} (s)", start_main.elapsed().as_secs());
     Ok(())
 }   
@@ -408,7 +442,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
 fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size: usize, ngram_size: usize,
                  tokenizer_str: &str, signature_writer: &SignatureWriter, num_sig_chunks: usize,
                  path_size: usize, line_size: usize, sig_size: usize, content_key: &str,
-                 concat_key: Option<&str>, exact_override: bool) -> Result<usize, Error> {
+                 concat_key: &Option<Vec<String>>, exact_override: bool) -> Result<usize, Error> {
     // Setup things: load data, build tokenizer, etc
     let data = read_pathbuf_to_mem(path).unwrap();
     // let mut buffer = Vec::new();
@@ -421,17 +455,17 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
 
     // Grouped lines 
     let mut line_groups: HashMap<usize, Vec<String>> = HashMap::new();
-    let mut last_concat_key = String::new();
+    let mut last_concat_val: Vec<String> = Vec::new();
     let mut cur_line = 0;
     for (line_num, line) in data.lines().enumerate() {
         let line = line.unwrap();
         let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));
         let line_text = json_obj.get(content_key).unwrap().as_str().unwrap().to_string();
-        if let Some(concat_key_real) = concat_key {
-            let concat_val = json_obj[concat_key_real].as_str().unwrap();
-            if concat_val != last_concat_key {
+        if let Some(ref concat_key_real) = concat_key {
+            let concat_val = get_concat_val(&json_obj, &concat_key_real).unwrap();
+            if concat_val != last_concat_val {
                 cur_line = line_num;
-                last_concat_key = concat_val.to_string();
+                last_concat_val = concat_val.clone();
             }
         } else {
             cur_line = line_num;
@@ -670,16 +704,14 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
     let start_main = Instant::now();
 
     // Load the config and initialize things
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
+    let config_obj = read_config(config).unwrap();
+    let file_map = FileMap::load(&PathBuf::from(config_obj.working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_size = to_byte_size(file_map.indices.len());
-    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
-    let sig_size = compute_sig_size(config_value["num_docs"].as_u64().unwrap() as usize);
+    let line_size = to_byte_size(config_obj.max_lines_per_path);
+    let sig_size = compute_sig_size(config_obj.num_docs);
 
     // Gather the files into the proper groups (which should live in the same hash-space-universe)
-    let edge_groups = gather_groups(working_dir.clone().join("sig_storage")).unwrap(); //(sigchunk, band_id) -> [(sigfile)]
+    let edge_groups = gather_groups(config_obj.working_dir.clone().join("sig_storage")).unwrap(); //(sigchunk, band_id) -> [(sigfile)]
     let single_band_id = edge_groups.iter().next().unwrap().key().1;
     let singleton_map : Option<DashMap<usize, usize>> = Some(DashMap::new()); // maps path_id -> max line_num 
 
@@ -697,7 +729,7 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
             };
 
             let band_group = build_band_group(entry.value(), sig_size, path_size, line_size, &singleton_map_opt).unwrap();
-            let output_filename = working_dir.clone()
+            let output_filename = config_obj.working_dir.clone()
                                   .join("edges")
                                   .join(format!("sigchunk_{:08}", sigchunk))
                                   .join(format!("band_{:08}.edges.bin", band_id));
@@ -705,7 +737,7 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
             pbar.inc(1);
         });
 
-    save_singletons(singleton_map.unwrap(), &working_dir.clone().join("edges").join("singletons.bin")).unwrap();
+    save_singletons(singleton_map.unwrap(), &config_obj.working_dir.clone().join("edges").join("singletons.bin")).unwrap();
     println!("... Gathered edges in {:?} seconds", start_main.elapsed().as_secs());
     // And save these for future use
 
@@ -876,17 +908,15 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     let start_main = Instant::now();
 
     // Load the config to initialize things
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
+    let config_obj = read_config(config).unwrap();
+    let file_map = FileMap::load(&PathBuf::from(config_obj.working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_size = to_byte_size(file_map.indices.len());
-    let line_size = to_byte_size(config_value["max_lines_per_path"].as_u64().unwrap() as usize);
+    let line_size = to_byte_size(config_obj.max_lines_per_path);
 
     // Build the union find and unite all the edges
     let uf = UFRush::new();
-    let all_edge_files = expand_dirs(vec![working_dir.clone().join("edges")], Some(vec![".edges.bin"].as_slice())).unwrap();
-    let singletons_path = working_dir.clone().join("edges").join("singletons.bin");
+    let all_edge_files = expand_dirs(vec![config_obj.working_dir.clone().join("edges")], Some(vec![".edges.bin"].as_slice())).unwrap();
+    let singletons_path = config_obj.working_dir.clone().join("edges").join("singletons.bin");
     let singletons = load_singletons(&singletons_path).unwrap();
 
     add_singletons_to_uf(singletons, &uf, line_size).unwrap();
@@ -913,12 +943,12 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
         pbar.inc(1);
     });
 
-    let cc_dir = working_dir.clone().join("ccs");
+    let cc_dir = config_obj.working_dir.clone().join("ccs");
     println!("CC DIR {:?}", cc_dir);
-    save_all_ccs(&cc_map, &cc_dir, config_value["num_sig_chunks"].as_u64().unwrap() as usize).unwrap();
+    save_all_ccs(&cc_map, &cc_dir, config_obj.num_sig_chunks).unwrap();
         
     let kill_list = collect_kill_list(cc_map);
-    let kill_dir = working_dir.clone().join("kill");
+    let kill_dir = config_obj.working_dir.clone().join("kill");
     save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
     println!("Organized and saved ccs in {:?} secs", start_cc.elapsed().as_secs());
 
@@ -1162,8 +1192,6 @@ fn parse_kill_file(kill_file: &PathBuf) -> Result<DashMap<usize, Vec<usize>>, Er
 
 
 
-
-
 /*=================================================================
 =                      PHASE 5: CLEAN DUPLICATES                  =
 =================================================================*/
@@ -1181,20 +1209,18 @@ fn parse_kill_file(kill_file: &PathBuf) -> Result<DashMap<usize, Vec<usize>>, Er
 fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
     println!("Starting UF-based pruning...");
     let start_main = Instant::now();
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    let input_dir = PathBuf::from(config_value["local_input"].as_str().unwrap());
-    let output_dir = PathBuf::from(config_value["local_output"].as_str().unwrap());
+    let config_obj = read_config(config).unwrap();
+
+
+    let working_dir = config_obj.working_dir; 
+    let input_dir = config_obj.local_input; 
+    let output_dir = config_obj.output_dir; 
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);
     let kill_dir = working_dir.clone().join("kill");
 
-    let concat_key = if let Some(concat_key) = config_value.get("concat_key") {
-        Some(concat_key.as_str().unwrap())
-    } else {
-        None
-    };
+
+    let concat_key = config_obj.concat_key; 
 
     // Parse the kill file into a map from path_id -> [lines to kill]
     println!("Reading kill file from disk...");
@@ -1213,7 +1239,7 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
     let pbar = build_pbar(path_chunk_files.len(), "Files to clean");
     path_chunk_files.par_iter().for_each(|(path, path_id)| {
         let lines_to_kill = kill_list.entry(*path_id).or_default();
-        let (remove, seen) = clean_path(&input_dir.clone().join(path), lines_to_kill.to_vec(), &input_dir, &output_dir, concat_key).unwrap();        
+        let (remove, seen) = clean_path(&input_dir.clone().join(path), lines_to_kill.to_vec(), &input_dir, &output_dir, &concat_key).unwrap();        
         documents_removed.fetch_add(remove, Ordering::SeqCst);
         documents_seen.fetch_add(seen, Ordering::SeqCst);
         pbar.inc(1);
@@ -1240,22 +1266,23 @@ fn get_output_filename(input_path: &PathBuf, config_input_dir: &PathBuf, config_
 
 
 fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathBuf, output_directory: &PathBuf,
-              concat_key: Option<&str>) -> Result<(usize, usize), Error> {
+              concat_key: &Option<Vec<String>>) -> Result<(usize, usize), Error> {
     // returns (lines_removed, lines_seen)
     let line_set: HashSet<usize> = lines_to_kill.into_iter().collect();
     let data = read_pathbuf_to_mem(path).unwrap();
-    let mut concat_kill: HashSet<String> = HashSet::new();
+    let mut concat_kill: HashSet<Vec<String>> = HashSet::new();
 
     let mut output_bytes = Vec::new();
     let mut line_num = 0;
     let mut lines_removed = 0;
+
     for line in data.lines() {
         let line = line?;
         if line_set.contains(&line_num) {
             lines_removed += 1;
             if let Some(concat_key_real) = concat_key {
                 let line_json: Value = serde_json::from_str(&line).unwrap();
-                let concat_val = line_json.get(concat_key_real).unwrap().as_str().unwrap().to_string();
+                let concat_val = get_concat_val(&line_json, &concat_key_real).unwrap();
                 concat_kill.insert(concat_val);
             }
 
@@ -1263,7 +1290,7 @@ fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathB
 
             if let Some(concat_key_real) = concat_key {
                 let line_json: Value = serde_json::from_str(&line).unwrap();
-                let concat_val = line_json.get(concat_key_real).unwrap().as_str().unwrap().to_string();                
+                let concat_val = get_concat_val(&line_json, &concat_key_real).unwrap();
                 if concat_kill.contains(&concat_val) {
                     lines_removed += 1;
                 } else {
@@ -1303,12 +1330,11 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
 
     let start_main = Instant::now();
     println!("Starming true jaccard similarity calculations");
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value : serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
-    let local_input = PathBuf::from(config_value["local_input"].as_str().unwrap());
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();        
-    let cc_dir = working_dir.clone().join("ccs");
+    let config_obj = read_config(config).unwrap();
+
+
+    let file_map = FileMap::load(&config_obj.working_dir.join("filemap.json.gz")).unwrap();        
+    let cc_dir = config_obj.working_dir.clone().join("ccs");
 
     // First load all ccs into memory and collect which files we have to load 
     println!("Loading cc's");
@@ -1339,11 +1365,11 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
     let tokensets: DashMap<(usize, usize), HashSet<usize>> = DashMap::new();    
     println!("WARNING: PATH SET NOT APPLICABLE FOR CONCAT_KEY [REPO/NAME] STUFF!!!");
     path_ids.into_par_iter().for_each(|p_id| {
-        let path = local_input.clone().join(reverse_path_indices.get(&p_id).unwrap().clone());
+        let path = config_obj.local_input.clone().join(reverse_path_indices.get(&p_id).unwrap().clone());
         process_path_set(&path, 
                          p_id, 
-                         config_value["ngram_size"].as_u64().unwrap() as usize, 
-                         config_value["tokenizer_str"].as_str().unwrap(),
+                         config_obj.ngram_size,
+                         config_obj.tokenizer_str.as_str(),
                          &tokensets).unwrap();
         pbar.inc(1);
     });
@@ -1373,7 +1399,7 @@ fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
     let pairwise_values: Vec<Vec<f32>> = pairwise_jacs.into_par_iter()
         .map(|entry| entry.1)
         .collect();
-    let pairwise_path = working_dir.clone().join("jaccard_values.json.gz");
+    let pairwise_path = config_obj.working_dir.clone().join("jaccard_values.json.gz");
     let pairwise_values_json = serde_json::to_vec(&pairwise_values).unwrap();
     write_mem_to_pathbuf(&pairwise_values_json, &pairwise_path).unwrap(); 
     println!("Saved pairwise similarities in {:?} secs", start_save.elapsed().as_secs());
@@ -1407,10 +1433,6 @@ fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
 }
 
 
-
-
-
-
 /*=================================================================
 =                             Aggregate commands                  =
 =================================================================*/
@@ -1427,9 +1449,6 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
     Ok(())
 
 }
-
-
-
 
 
 /*=================================================================
