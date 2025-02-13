@@ -1464,13 +1464,14 @@ fn fast_text_tag(input_dir: &PathBuf, fasttext_path: &PathBuf) -> Result<(), Err
     model.load_model(fasttext_path.as_path().to_str().unwrap()).unwrap();
 
     paths.par_iter().for_each(|p| {
-        tag_path(&p, &model).unwrap();
+        codeprose_filter(&p, &model).unwrap();
         pbar.inc(1);
     });
 
     Ok(())
 
 }
+
 
 
 
@@ -1508,6 +1509,77 @@ fn tag_path(input_path: &PathBuf, model: &FastText) -> Result<(), Error> {
     Ok(())
 
 }
+
+
+fn codeprose_filter(input_path: &PathBuf, model: &FastText) -> Result<(), Error> {
+
+    const CODE_FRAC: f32 = 0.05;
+    const PROSE_FRAC: f32 = 0.3;
+    const CODE_COUNT: usize = 8;
+    const CODE_MEAN_ENTROPY: f32 = 0.5;
+
+
+
+    let data = read_pathbuf_to_mem(input_path).unwrap();
+    let mut out_bytes: Vec<u8> = Vec::new();
+    let newline: u8 = b'\n';
+
+
+    for doc in data.lines() {
+        let doc = doc.unwrap();
+        let json_obj: Value = serde_json::from_str(&doc).unwrap();
+        let doc_text = json_obj.get("text").unwrap().as_str().unwrap();
+
+        // Keep track of 
+        // - count of {code, prose, other} lines
+        // - total entropy
+        let mut total_entropy: f32 = 0.0;
+        let mut counts: HashMap<String, usize> = HashMap:: new();
+        let mut total_count = 0;
+
+    
+        for line in doc_text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue
+            }
+            total_count += 1;
+            let label = if line.len() <= 4 {
+                String::from("__label__other")
+            } else {
+
+                let prediction = model.predict(line, -1, 0.0).unwrap();
+
+                let pred_label = prediction.last().unwrap().label.clone();
+                for pred in prediction.into_iter() {
+                    if pred.prob > 0.0 {
+                        total_entropy -= pred.prob * pred.prob.log2();
+                    }
+                }
+                pred_label
+            };
+            *counts.entry(label).or_insert(0) += 1;            
+        }        
+        let total_count = total_count as f32;
+
+    
+        if (*counts.get("__label__code").unwrap_or(&(0 as usize)) as f32> total_count * CODE_FRAC) && 
+            (*counts.get("__label__prose").unwrap_or(&(0 as usize)) as f32 > total_count * PROSE_FRAC) && 
+            (*counts.get("__label__code").unwrap_or(&(0 as usize)) >= CODE_COUNT) && 
+            (total_entropy / total_count < CODE_MEAN_ENTROPY) {
+            out_bytes.extend(serde_json::to_vec(&json_obj).unwrap());
+            out_bytes.push(newline);
+        }
+
+    }
+    if out_bytes.len() > 0 {
+        write_mem_to_pathbuf(&out_bytes, input_path).unwrap();
+    } 
+        
+
+    Ok(())
+}
+
 
 /*=================================================================
 =                             Aggregate commands                  =
