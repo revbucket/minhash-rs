@@ -1533,7 +1533,7 @@ fn codeprose_filter(input_path: &PathBuf, model: &FastText) -> Result<(), Error>
         // Keep track of 
         // - count of {code, prose, other} lines
         // - total entropy
-        let mut total_entropy: f32 = 0.0;
+        let mut total_code_entropy: f32 = 0.0;
         let mut counts: HashMap<String, usize> = HashMap:: new();
         let mut total_count = 0;
 
@@ -1552,8 +1552,11 @@ fn codeprose_filter(input_path: &PathBuf, model: &FastText) -> Result<(), Error>
                 let mut pred_label = String::from("__label__other");
                 let mut max_prob = 0.0;
                 for pred in prediction.into_iter() {
+
                     if pred.prob > 0.0 {
-                        total_entropy -= pred.prob * pred.prob.log2();
+                        if pred.label == String::from("__labe__code") {
+                            total_code_entropy -= pred.prob * pred.prob.log2();
+                        }
                         if pred.prob > max_prob {
                             max_prob = pred.prob;
                             pred_label = pred.label;
@@ -1570,7 +1573,7 @@ fn codeprose_filter(input_path: &PathBuf, model: &FastText) -> Result<(), Error>
         if (*counts.get("__label__code").unwrap_or(&(0 as usize)) as f32> total_count * CODE_FRAC) && 
             (*counts.get("__label__prose").unwrap_or(&(0 as usize)) as f32 > total_count * PROSE_FRAC) && 
             (*counts.get("__label__code").unwrap_or(&(0 as usize)) >= CODE_COUNT) && 
-            (total_entropy / total_count < CODE_MEAN_ENTROPY) {
+            (total_code_entropy / total_count < CODE_MEAN_ENTROPY) {
             out_bytes.extend(serde_json::to_vec(&json_obj).unwrap());
             out_bytes.push(newline);
         }
