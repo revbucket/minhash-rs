@@ -34,6 +34,7 @@ use std::time::Instant;
 use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
+use fasttext::FastText;
 
 pub mod io;
 pub mod storage;
@@ -213,6 +214,14 @@ enum Commands {
     TrueJacc {
         #[arg(required=true, long)]
         config: PathBuf
+    },
+
+
+    Fasttext {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+        #[arg(required=true, long)]        
+        model: PathBuf
     }
 
 }
@@ -1443,6 +1452,63 @@ fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
 }
 
 
+/*==================================================================
+=                            FAST TEXT TAGGINg                     =
+==================================================================*/
+
+fn fast_text_tag(input_dir: &PathBuf, fasttext_path: &PathBuf) -> Result<(), Error> {
+    let paths = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+    let pbar = build_pbar(paths.len(), "Paths");
+    let mut model = FastText::new();
+    model.load_model(fasttext_path.as_path().to_str().unwrap()).unwrap();
+
+    paths.par_iter().for_each(|p| {
+        tag_path(&p, &model).unwrap();
+        pbar.inc(1);
+    });
+
+    Ok(())
+
+}
+
+
+
+fn tag_path(input_path: &PathBuf, model: &FastText) -> Result<(), Error> {
+    let data = read_pathbuf_to_mem(input_path).unwrap();
+    let mut out_bytes: Vec<u8> = Vec::new();
+    let newline: u8 = b'\n';
+
+    let lines: Vec<_> = data.lines().collect();
+
+    let pbar = build_pbar(lines.len(), "LINES");
+    for line in lines.into_iter() {
+        let line = line.unwrap();
+        let mut json_obj: Value = serde_json::from_str(&line).unwrap();
+
+        let line_text = json_obj.get("text").unwrap().as_str().unwrap();
+
+        let prediction = model.predict(line_text, 3, 0.0).unwrap();
+
+        for pred in prediction.into_iter() {
+            if let Value::Object(ref mut map) = json_obj {
+                map.insert(pred.label, Value::from(pred.prob));
+            }
+            //pred.label.sanoeuth();
+        }
+
+        out_bytes.extend(serde_json::to_vec(&json_obj).unwrap());
+        out_bytes.push(newline);
+        pbar.inc(1);
+        //prediction.santoheu();
+    }
+
+    write_mem_to_pathbuf(&out_bytes, input_path).unwrap();
+
+    Ok(())
+
+}
+
 /*=================================================================
 =                             Aggregate commands                  =
 =================================================================*/
@@ -1501,6 +1567,10 @@ fn main() {
 
         Commands::TrueJacc {config} => {
             get_true_jacc_small(config)
+        },
+
+        Commands::Fasttext {input_dir, model} => {
+            fast_text_tag(input_dir, model)
         }
 
 
