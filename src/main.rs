@@ -1548,15 +1548,19 @@ fn codeprose_filter(input_path: &PathBuf, model: &FastText) -> Result<(), Error>
                 String::from("__label__other")
             } else {
 
-                let prediction = model.predict(line, -1, 0.0).unwrap();
-
-                let pred_label = prediction.last().unwrap().label.clone();
+                let prediction = model.predict(line, 3, 0.0).unwrap();
+                let mut pred_label = String::from("__label__other");
+                let mut max_prob = 0.0;
                 for pred in prediction.into_iter() {
                     if pred.prob > 0.0 {
                         total_entropy -= pred.prob * pred.prob.log2();
+                        if pred.prob > max_prob {
+                            max_prob = pred.prob;
+                            pred_label = pred.label;
+                        }
                     }
                 }
-                pred_label
+                pred_label.clone()
             };
             *counts.entry(label).or_insert(0) += 1;            
         }        
