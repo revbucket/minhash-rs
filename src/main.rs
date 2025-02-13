@@ -1479,10 +1479,10 @@ fn tag_path(input_path: &PathBuf, model: &FastText) -> Result<(), Error> {
     let mut out_bytes: Vec<u8> = Vec::new();
     let newline: u8 = b'\n';
 
-    let lines: Vec<_> = data.lines().collect();
+    //let lines: Vec<_> = data.lines().collect();
 
-    let pbar = build_pbar(lines.len(), "LINES");
-    for line in lines.into_iter() {
+    //let pbar = build_pbar(lines.len(), "LINES");
+    for line in data.lines() {
         let line = line.unwrap();
         let mut json_obj: Value = serde_json::from_str(&line).unwrap();
 
@@ -1499,7 +1499,7 @@ fn tag_path(input_path: &PathBuf, model: &FastText) -> Result<(), Error> {
 
         out_bytes.extend(serde_json::to_vec(&json_obj).unwrap());
         out_bytes.push(newline);
-        pbar.inc(1);
+        //pbar.inc(1);
         //prediction.santoheu();
     }
 
