@@ -211,6 +211,11 @@ enum Commands {
     TrueJacc {
         #[arg(required=true, long)]
         config: PathBuf
+    },
+
+    AddId {
+        #[arg(required=true, long)]
+        input_dir: PathBuf
     }
 
 }
@@ -1430,6 +1435,54 @@ fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
 }
 
 
+/*================================================================
+=                              WARCID                            =
+================================================================*/
+
+fn add_all_ids(input_dir: &PathBuf) -> Result<(), Error> {
+    let paths = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+    let pbar = build_pbar(paths.len(), "Paths");
+
+    paths.par_iter().for_each(|p| {
+        add_warc_id(&p).unwrap();
+        pbar.inc(1);
+    });
+
+    Ok(())
+
+}
+
+fn add_warc_id(input_path: &PathBuf) -> Result<(), Error> {
+    let data = read_pathbuf_to_mem(input_path).unwrap();
+    let mut out_bytes: Vec<u8> = Vec::new();
+    let newline: u8 = b'\n';
+
+    //let lines: Vec<_> = data.lines().collect();
+
+    //let pbar = build_pbar(lines.len(), "LINES");
+    for line in data.lines() {
+        let line = line.unwrap();
+        let mut json_obj: Value = serde_json::from_str(&line).unwrap();
+
+        let warc_id = json_obj.get("metadata").and_then(|v| v.get("WARC-Record-ID")).unwrap().clone();
+        if let Value::Object(ref mut map) = json_obj {
+            map.insert("id".to_string(), warc_id.clone());
+        }
+
+        out_bytes.extend(serde_json::to_vec(&json_obj).unwrap());
+        out_bytes.push(newline);
+    }
+
+    write_mem_to_pathbuf(&out_bytes, input_path).unwrap();
+
+    Ok(())
+
+}
+
+
+
+
 /*=================================================================
 =                             Aggregate commands                  =
 =================================================================*/
@@ -1488,8 +1541,11 @@ fn main() {
 
         Commands::TrueJacc {config} => {
             get_true_jacc_small(config)
-        }
+        },
 
+        Commands::AddId {input_dir} => {
+            add_all_ids(input_dir)
+        }
 
 
         _ => {Ok(())}
