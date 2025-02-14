@@ -4,7 +4,6 @@ use anyhow::{Error, Result};
 use clap::{Parser, Subcommand};
 use dashmap::{DashMap, DashSet};
 use glob::glob;
-use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::Array1;
 use rand::prelude::*;
 use rand::{Rng, SeedableRng};
@@ -17,6 +16,7 @@ use serde_yaml;
 use sha2::{Digest, Sha256};
 use tiktoken_rs::{CoreBPE, p50k_base};
 use unicode_segmentation::UnicodeSegmentation;
+use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar};
 
 // Standard library
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -31,12 +31,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 // Internal crate imports
-use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
+//use crate::io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
 use fasttext::FastText;
 
-pub mod io;
 pub mod storage;
 pub mod uf_rush2;
 
@@ -277,18 +276,6 @@ fn read_config(config_path: &PathBuf) -> Result<Config, Error> {
 /*=================================================================
 =                             UTILITIES                           =
 =================================================================*/
-
-
-fn build_pbar(num_items: usize, units: &str) -> ProgressBar {
-    let mut template = String::from(units);
-    template.push_str(" {human_pos}/{human_len} [{elapsed_precise}/{duration_precise}] [{wide_bar:.cyan/blue}]");
-    let pbar = ProgressBar::new(num_items as u64)
-        .with_style(
-            ProgressStyle::with_template(&template).unwrap()
-        );
-    pbar.inc(0);
-    pbar
-}
 
 
 fn get_concat_val(obj: &Value, concat_key: &Vec<String>) -> Result<Vec<String>, Error> {

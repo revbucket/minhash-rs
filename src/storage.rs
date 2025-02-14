@@ -32,7 +32,7 @@ use std::cmp::{PartialEq, Eq};
 use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
 use anyhow::{Result, Error};
-use crate::io::{read_pathbuf_to_mem, write_mem_to_pathbuf, expand_dirs};
+use mj_io::{read_pathbuf_to_mem, write_mem_to_pathbuf, expand_dirs};
 use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
 
