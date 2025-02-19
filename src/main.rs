@@ -211,6 +211,14 @@ enum Commands {
     TrueJacc {
         #[arg(required=true, long)]
         config: PathBuf
+    },
+
+    CountPL {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(long, required=true)]
+        output: PathBuf
     }
 
 }
@@ -1430,6 +1438,7 @@ fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
 }
 
 
+
 /*=================================================================
 =                             Aggregate commands                  =
 =================================================================*/
@@ -1446,6 +1455,54 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
     Ok(())
 
 }
+
+
+/*======================================================================
+=                               COUNT PROGRAMMING LANGUAGE             =
+======================================================================*/
+
+fn count_pl(input_dir: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+
+    let all_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+    let global_count: DashMap<String, usize> = DashMap::new();
+    let pbar = build_pbar(all_files.len(), "Files");
+    
+    all_files.par_iter().for_each(|p| {
+        count_pl_single(p, &global_count).unwrap();
+        pbar.inc(1);
+    });
+
+
+    println!("global_count {:?}", global_count);
+    let global_count_hash : HashMap<String, usize> = global_count.iter().map(|r| (r.key().clone(), r.value().clone())).collect();
+    let json = serde_json::to_string_pretty(&global_count_hash)?;
+
+    write_mem_to_pathbuf(json.as_bytes(), output).unwrap();
+
+    Ok(())
+}
+
+
+fn count_pl_single(path: &PathBuf, count: &DashMap<String, usize>) -> Result<(), Error> {
+    let data = read_pathbuf_to_mem(path).unwrap();
+    let mut single_hash : HashMap<String, usize> = HashMap::new();
+    for (line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));
+        let pl = json_obj.get("metadata").unwrap().get("language").unwrap().as_str().unwrap().to_string();
+
+        *single_hash.entry(pl).or_insert(0) += 1;
+    }
+
+    single_hash.iter().for_each(|(k, v)| {
+        *count.entry(k.clone()).or_insert(0).value_mut() += v;
+    });
+
+    Ok(())
+}
+
+
 
 
 /*=================================================================
@@ -1488,8 +1545,11 @@ fn main() {
 
         Commands::TrueJacc {config} => {
             get_true_jacc_small(config)
-        }
+        },
 
+        Commands::CountPL {input_dir, output} => {
+            count_pl(input_dir, output)
+        }
 
 
         _ => {Ok(())}
