@@ -1,4 +1,5 @@
 // External crates
+use serde_json::json;
 use ahash::RandomState;
 use anyhow::{Error, Result};
 use clap::{Parser, Subcommand};
@@ -219,6 +220,14 @@ enum Commands {
 
         #[arg(long, required=true)]
         output: PathBuf
+    },
+
+    ConcatFilter {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(long, required=true)]
+        output_dir: PathBuf
     }
 
 }
@@ -1503,6 +1512,94 @@ fn count_pl_single(path: &PathBuf, count: &DashMap<String, usize>) -> Result<(),
 }
 
 
+/*======================================================================
+=                               CONCATENATE AND FILTER                 =
+======================================================================*/
+
+const PROGRAMMING_LANGUAGES: &[&str] = &[
+    "Python",
+    "Java",
+    "C++",
+    "C",
+    "JavaScript",
+    "PHP",
+    "C#",
+    "Go",
+    "TypeScript",
+    "SQL",
+    "Ruby",
+    "Rust",
+    "Jupyter Notebook",
+    "Scala",
+    "Kotlin",
+    "Shell",
+    "Dart",
+    "Swift",
+];
+
+
+fn concat_filter(input_dir: &PathBuf, output_dir: &PathBuf) -> Result<(), Error> {
+    let all_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+    let pbar = build_pbar(all_files.len(), "Files");
+
+    all_files.par_iter().for_each(|p| {
+        let output_file = p.clone().strip_prefix(input_dir).ok().map(|stripped| output_dir.clone().join(stripped)).unwrap();
+
+
+        concat_filter_single(p, &output_file).unwrap();
+        pbar.inc(1);
+    });
+
+    Ok(())
+}
+
+
+fn concat_filter_single(input: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+
+    let pl_set : HashSet<&str> = PROGRAMMING_LANGUAGES.iter().copied().collect();
+    let data = read_pathbuf_to_mem(input).unwrap();   
+    let mut repo_pl : HashMap<(String, String), Vec<Value>> = HashMap::new();
+
+    // Step 1: group all repo + pl's into vectors
+    for (line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", input.clone(), line_num));
+        let pl = json_obj.get("metadata").unwrap().get("language").unwrap().as_str().unwrap().to_string();
+        if !pl_set.contains(&pl.as_str()) {
+            continue;
+        }
+        let repo = json_obj.get("metadata").unwrap().get("repo_name").unwrap().as_str().unwrap().to_string();
+        repo_pl.entry((pl, repo)).or_default().push(json_obj);
+    }
+
+
+    let mut output_bytes: Vec<u8> = Vec::new();
+    repo_pl.into_iter().for_each(|(k, v)| {
+        let id = v[0].get("id").unwrap();
+        let texts: Vec<&str> = v.iter().map(|d| {
+            d.get("text").unwrap().as_str().unwrap()
+        }).collect();
+        let concat_text = texts.join("\n\n");
+        let new_doc = json!({
+            "id": id, 
+            "text": concat_text,
+            "language": k.0,
+            "repo_name": k.1,
+            "num_files": v.len()
+        }).to_string().into_bytes();
+
+        output_bytes.extend(new_doc);
+        output_bytes.push('\n' as u8);  
+    });
+    write_mem_to_pathbuf(&output_bytes, output).unwrap();
+
+
+    Ok(())
+}
+
+
+
 
 
 /*=================================================================
@@ -1549,6 +1646,10 @@ fn main() {
 
         Commands::CountPL {input_dir, output} => {
             count_pl(input_dir, output)
+        },
+
+        Commands::ConcatFilter {input_dir, output_dir} => {
+            concat_filter(input_dir, output_dir)
         }
 
 
