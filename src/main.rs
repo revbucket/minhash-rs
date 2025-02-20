@@ -228,7 +228,17 @@ enum Commands {
 
         #[arg(long, required=true)]
         output_dir: PathBuf
+    },
+
+    LengthStats {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        output: PathBuf,
     }
+
+
 
 }
 
@@ -1539,6 +1549,7 @@ const PROGRAMMING_LANGUAGES: &[&str] = &[
 
 
 fn concat_filter(input_dir: &PathBuf, output_dir: &PathBuf) -> Result<(), Error> {
+    let start_main = Instant::now();
     let all_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
 
     let pbar = build_pbar(all_files.len(), "Files");
@@ -1550,7 +1561,7 @@ fn concat_filter(input_dir: &PathBuf, output_dir: &PathBuf) -> Result<(), Error>
         concat_filter_single(p, &output_file).unwrap();
         pbar.inc(1);
     });
-
+    println!("FINISHED THE THING IN {:?} SEC", start_main.elapsed().as_secs());
     Ok(())
 }
 
@@ -1559,28 +1570,64 @@ fn concat_filter_single(input: &PathBuf, output: &PathBuf) -> Result<(), Error> 
 
     let pl_set : HashSet<&str> = PROGRAMMING_LANGUAGES.iter().copied().collect();
     let data = read_pathbuf_to_mem(input).unwrap();   
-    let mut repo_pl : HashMap<(String, String), Vec<Value>> = HashMap::new();
+    //let mut repo_pl : HashMap<(String, String), Vec<Value>> = HashMap::new();
+
+    let mut concat_texts : HashMap<(String, String), String> = HashMap::new();
 
     // Step 1: group all repo + pl's into vectors
     for (line_num, line) in data.lines().enumerate() {
-        let line = line.unwrap();
-        let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", input.clone(), line_num));
-        let pl = json_obj.get("metadata").unwrap().get("language").unwrap().as_str().unwrap().to_string();
+        // Handle each operation that could fail, continuing on error
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Error reading line {}: {}", line_num, e);
+                continue;
+            }
+        };
+
+        let json_obj: Value = match serde_json::from_str(&line) {
+            Ok(obj) => obj,
+            Err(e) => {
+                eprintln!("Failed to parse JSON at line {}: {}", line_num, e);
+                continue;
+            }
+        };
+
+        // Use if let chains to handle the nested gets more elegantly
+        let (pl, repo) = if let (Some(_metadata), Some(lang), Some(repo_name)) = (
+            json_obj.get("metadata"),
+            json_obj.get("metadata").and_then(|m| m.get("language")).and_then(|l| l.as_str()),
+            json_obj.get("metadata").and_then(|m| m.get("repo_name")).and_then(|r| r.as_str())
+        ) {
+            (lang.to_string(), repo_name.to_string())
+        } else {
+            eprintln!("Missing required fields at line {}", line_num);
+            continue;
+        };
+
         if !pl_set.contains(&pl.as_str()) {
             continue;
         }
-        let repo = json_obj.get("metadata").unwrap().get("repo_name").unwrap().as_str().unwrap().to_string();
-        repo_pl.entry((pl, repo)).or_default().push(json_obj);
+
+        //concat_texts.entry((pl, repo)).or_default().push_str(json_obj.get("text").unwrap().as_str().unwrap());
     }
 
-
+    return Ok(());
     let mut output_bytes: Vec<u8> = Vec::new();
-    repo_pl.into_iter().for_each(|(k, v)| {
-        let id = v[0].get("id").unwrap();
-        let texts: Vec<&str> = v.iter().map(|d| {
-            d.get("text").unwrap().as_str().unwrap()
-        }).collect();
-        let concat_text = texts.join("\n\n");
+    concat_texts.into_iter().for_each(|(k, v)| {
+        //let id = v[0].get("id").unwrap();
+        //let texts: Vec<&str> = v.iter().map(|d| {
+        //    d.get("text").unwrap().as_str().unwrap()
+        //}).collect();
+        //let concat_text = texts.join("\n\n");
+        let new_doc = serde_json::to_vec(&json!({
+            "id": 1234,
+            "text": v,
+            "language": k.0,
+            "repo_name": k.1,
+            "num_files": v.len()
+        })).unwrap();
+        /*
         let new_doc = json!({
             "id": id, 
             "text": concat_text,
@@ -1588,7 +1635,7 @@ fn concat_filter_single(input: &PathBuf, output: &PathBuf) -> Result<(), Error> 
             "repo_name": k.1,
             "num_files": v.len()
         }).to_string().into_bytes();
-
+        */
         output_bytes.extend(new_doc);
         output_bytes.push('\n' as u8);  
     });
@@ -1598,8 +1645,46 @@ fn concat_filter_single(input: &PathBuf, output: &PathBuf) -> Result<(), Error> 
     Ok(())
 }
 
+/*=====================================================
+=                      LENGTH STATS                   =
+=====================================================*/
 
 
+
+
+fn length_stats(input_dir: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+    let start_main = Instant::now();
+    let all_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+    let pbar = build_pbar(all_files.len(), "Files");
+
+    let all_lengths: Vec<usize> = all_files.par_iter().flat_map(|p| {
+        let lengths = get_lengths(p).unwrap();
+        pbar.inc(1);
+        lengths
+    }).collect();
+
+    println!("Casting to str and saving");
+    let output_str = all_lengths.par_iter().map(|x| x.to_string()).collect::<Vec<String>>().join(" ");
+    let output_bytes = output_str.as_bytes();
+
+    write_mem_to_pathbuf(output_bytes, output).unwrap();
+
+    println!("FINISHED THE THING IN {:?} SEC", start_main.elapsed().as_secs());
+    Ok(())
+}
+
+fn get_lengths(path: &PathBuf) -> Result<Vec<usize>, Error> {
+    let data = read_pathbuf_to_mem(path).unwrap();
+    let mut lengths: Vec<usize> = Vec::new();
+    for (line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();    
+        let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));
+        let line_text = json_obj.get("text").unwrap().as_str().unwrap().to_string();
+        lengths.push(line_text.len());
+    }
+    Ok(lengths)
+}
 
 
 /*=================================================================
@@ -1650,6 +1735,10 @@ fn main() {
 
         Commands::ConcatFilter {input_dir, output_dir} => {
             concat_filter(input_dir, output_dir)
+        },
+
+        Commands::LengthStats {input_dir, output} => {
+            length_stats(input_dir, output)
         }
 
 
