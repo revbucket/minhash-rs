@@ -30,11 +30,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+
 // Internal crate imports
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
-
 pub mod storage;
 pub mod uf_rush2;
 
@@ -230,9 +230,30 @@ enum Commands {
         output_dir: PathBuf
     },
 
+
+    PythonFilter {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        output_dir: PathBuf
+    },
+
     LengthStats {
         #[arg(required=true, long)]
         input_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        output: PathBuf,
+    },
+
+
+    TokenPl {
+        #[arg(required=true, long)]
+        data_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        metadata_dir: PathBuf,
 
         #[arg(required=true, long)]
         output: PathBuf,
@@ -1548,6 +1569,11 @@ const PROGRAMMING_LANGUAGES: &[&str] = &[
 ];
 
 
+const JUST_PYTHQN: &[&str] = &[
+    "Python"
+];
+
+
 fn concat_filter(input_dir: &PathBuf, output_dir: &PathBuf) -> Result<(), Error> {
     let start_main = Instant::now();
     let all_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
@@ -1645,6 +1671,47 @@ fn concat_filter_single(input: &PathBuf, output: &PathBuf) -> Result<(), Error> 
     Ok(())
 }
 
+fn python_filter(input_dir: &PathBuf, output_dir: &PathBuf) -> Result<(), Error> {
+    let start_main = Instant::now();
+    let all_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+    let pbar = build_pbar(all_files.len(), "Files");
+
+    all_files.par_iter().for_each(|p| {
+        let output_file = p.clone().strip_prefix(input_dir).ok().map(|stripped| output_dir.clone().join(stripped)).unwrap();
+
+
+        python_filter_single(p, &output_file).unwrap();
+        pbar.inc(1);
+    });
+    println!("FINISHED THE THING IN {:?} SEC", start_main.elapsed().as_secs());
+    Ok(())
+}
+
+
+fn python_filter_single(input_path: &PathBuf, output_file: &PathBuf) -> Result<(), Error> {
+    let data = read_pathbuf_to_mem(input_path).unwrap();
+
+    let mut output_lines: Vec<_> = Vec::new();
+
+
+    for (line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", input_path.clone(), line_num));
+        let pl = json_obj.get("metadata").and_then(|m| m.get("language")).and_then(|l| l.as_str()).unwrap();
+        if pl ==  "Python" {
+            output_lines.extend(line.into_bytes());
+            output_lines.push(b'\n');
+        }
+    }
+
+    if output_lines.len() > 0 {
+        write_mem_to_pathbuf(&output_lines.as_slice(), output_file).unwrap()
+    }
+    Ok(())
+}
+
+
 /*=====================================================
 =                      LENGTH STATS                   =
 =====================================================*/
@@ -1685,6 +1752,91 @@ fn get_lengths(path: &PathBuf) -> Result<Vec<usize>, Error> {
     }
     Ok(lengths)
 }
+
+/*================================================================
+=                         Token PL                               =
+================================================================*/
+
+fn token_pl(data_dir: &PathBuf, metadata_dir: &PathBuf, output_file: &PathBuf) -> Result<(), Error> {
+
+    let start_main = Instant::now();
+    let data_files = expand_dirs(vec![data_dir.clone()], None).unwrap();
+
+    let data_pbar = build_pbar(data_files.len(), "Data Files");
+
+    let pl_lookup : DashMap<String, DashMap<usize, String>> = DashMap::new();
+
+    data_files.par_iter().for_each(|p| {
+        build_pl_lookup(p, &pl_lookup).unwrap();
+        data_pbar.inc(1);
+    });
+
+    println!("Finished building token lookup in {:?} s", start_main.elapsed().as_secs());
+    let start_csv = Instant::now();
+    let metadata_ext = vec!["csv.gz"];
+    let csv_files = expand_dirs(vec![metadata_dir.clone()], Some(metadata_ext.as_slice())).unwrap();
+    let tokens_by_pl : DashMap<String, usize> = DashMap::new();
+    let csv_pbar = build_pbar(csv_files.len(), "CSV Files");
+    csv_files.par_iter().for_each(|p| {
+        count_pl_sizes(p, &pl_lookup, &tokens_by_pl).unwrap();
+        csv_pbar.inc(1);
+     });
+    println!("Finished csv parse in {:?}" , start_csv.elapsed().as_secs());
+
+    let tokens_by_pl_hash : HashMap<String, usize> = tokens_by_pl.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
+    println!("COUNTS {:?}", tokens_by_pl_hash);
+    let json = serde_json::to_value(tokens_by_pl_hash).unwrap();
+    let json_bytes = serde_json::to_vec(&json).unwrap();
+    write_mem_to_pathbuf(&json_bytes.as_slice(), &output_file).unwrap();
+
+    Ok(())
+}
+
+
+fn build_pl_lookup(path: &PathBuf, pl_lookup: &DashMap<String, DashMap<usize, String>>) -> Result<(), Error> {
+
+    let data = read_pathbuf_to_mem(path).unwrap();
+    let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+    let cur_dash : DashMap<usize, String> = DashMap::new();
+    for (line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));
+        let pl = json_obj.get("metadata").unwrap().get("language").unwrap().as_str().unwrap().to_string();
+        cur_dash.insert(line_num, pl.clone());
+    }
+
+    pl_lookup.insert(filename, cur_dash);
+    Ok(())
+}
+
+
+fn count_pl_sizes(path :&PathBuf, pl_lookup: &DashMap<String, DashMap<usize, String>>, tokens_by_pl: &DashMap<String, usize>) -> Result<(), Error> {
+
+    let data =read_pathbuf_to_mem(path).unwrap();
+    let mut cur_map: HashMap<String, usize> = HashMap::new();
+
+    for (_, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        let parts: Vec<&str> = line.split(',').collect();
+        let start_offset: usize = parts[0].parse().unwrap();
+        let end_offset: usize = parts[1].parse().unwrap();
+        let data_file = PathBuf::from(parts[3].to_string()).file_name().unwrap().to_string_lossy().into_owned();
+
+        let line_number: usize = parts[4].parse().unwrap();
+
+        let num_tokens = end_offset - start_offset;
+        let inner = pl_lookup.get(&data_file).unwrap();
+        let pl = inner.get(&line_number).unwrap().to_string();
+        cur_map.entry(pl).and_modify(|v| *v += num_tokens).or_insert(num_tokens);
+    }
+
+    cur_map.iter().for_each(|(k, v)| {
+        tokens_by_pl.entry(k.to_string()).and_modify(|og_val| *og_val += v).or_insert(*v);
+    });
+
+    Ok(())
+}
+
 
 
 /*=================================================================
@@ -1739,6 +1891,14 @@ fn main() {
 
         Commands::LengthStats {input_dir, output} => {
             length_stats(input_dir, output)
+        },
+
+        Commands::TokenPl {data_dir, metadata_dir, output} => {
+            token_pl(data_dir, metadata_dir, output)
+        },
+
+        Commands::PythonFilter {input_dir, output_dir} => {
+            python_filter(input_dir, output_dir)
         }
 
 
