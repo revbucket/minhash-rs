@@ -1837,6 +1837,44 @@ fn count_pl_sizes(path :&PathBuf, pl_lookup: &DashMap<String, DashMap<usize, Str
     Ok(())
 }
 
+/*=================================================================
+=                           PARTITION TOKENS                      =
+=================================================================*/
+
+
+fn partition_npy_tokens(input_dir: &PathBuf, output_dir: &PathBuf, mb_size: usize) -> Result<(), Error> {
+
+    let start_main = Instant::now();
+    let data_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
+    let pbar = build_pbar(data_files.len(), "NPYS");
+    for data_file in data_files {
+        let output_file_base = data_file.clone().strip_prefix(input_dir).ok().map(|stripped| output_dir.clone().join(stripped)).unwrap();        
+        partition_npy_tokens_single(&data_file, &output_file_base, mb_size).unwrap(); 
+        pbar.inc(1);
+    }
+
+    println!("Finished splitting all files in {:?} secs", start_main.elapsed());
+    Ok(())
+}
+
+
+fn partition_npy_tokens_single(data_file: &PathBuf, output_file_base: &PathBuf, mb_size: usize) -> Result<(), Error> {
+    let contents = read_pathbuf_to_mem(data_file).unwrap().into_inner().into_inner();
+    let chunk_token_size = mb_size / 4;
+    let num_tokens = contents.len() / 4;
+    let num_chunks = (num_tokens + chunk_token_size - 1) / chunk_token_size;
+    (0..num_chunks).into_par_iter().for_each(|i| {
+        let chunk_contents = &contents[i * chunk_token_size.. i * chunk_token_size + chunk_token_size];
+        let file_stem = output_file_base.file_stem().unwrap().to_str().unwrap();
+        let new_file_name = format!("{}-{:04}.npy", file_stem, i);
+        let parent = output_file_base.parent().unwrap();
+        let output_file = parent.join(new_file_name);
+
+        write_mem_to_pathbuf(chunk_contents, &output_file).unwrap();
+    });
+    Ok(())
+
+}
 
 
 /*=================================================================
@@ -1899,6 +1937,11 @@ fn main() {
 
         Commands::PythonFilter {input_dir, output_dir} => {
             python_filter(input_dir, output_dir)
+        }
+
+
+        Commands::PartitionTokens {input_dir, output_dir, mb_size} => {
+            partition_npy_tokens(input_dir, output_dir, mb_size)
         }
 
 
