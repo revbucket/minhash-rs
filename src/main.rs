@@ -257,6 +257,17 @@ enum Commands {
 
         #[arg(required=true, long)]
         output: PathBuf,
+    },
+
+    Subsample {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        output_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        ratio: f32
     }
 
 
@@ -1860,6 +1871,8 @@ fn partition_npy_tokens(input_dir: &PathBuf, output_dir: &PathBuf, mb_size: usiz
 
 fn partition_npy_tokens_single(data_file: &PathBuf, output_file_base: &PathBuf, mb_size: usize) -> Result<(), Error> {
     let contents = read_pathbuf_to_mem(data_file).unwrap().into_inner().into_inner();
+    for (line_num, line) in contents.lines();
+
     let chunk_token_size = mb_size / 4;
     let num_tokens = contents.len() / 4;
     let num_chunks = (num_tokens + chunk_token_size - 1) / chunk_token_size;
@@ -1875,6 +1888,52 @@ fn partition_npy_tokens_single(data_file: &PathBuf, output_file_base: &PathBuf, 
     Ok(())
 
 }
+
+/*================================================================
+=                           SUBSAMPLE                            =
+================================================================*/
+fn subsample(input_dir: &PathBuf, output_dir: &PathBuf, ratio: f32) -> Result<(), Error> {
+    let start_main = Instant::now();
+    let all_files = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+    let pbar = build_pbar(all_files.len(), "Files");
+
+    all_files.par_iter().for_each(|p| {
+        let output_file = p.clone().strip_prefix(input_dir).ok().map(|stripped| output_dir.clone().join(stripped)).unwrap();
+
+
+        subsample_single(p, &output_file, ratio).unwrap();
+        pbar.inc(1);
+    });
+    println!("FINISHED THE THING IN {:?} SEC", start_main.elapsed().as_secs());
+    Ok(())
+}
+
+
+
+fn subsample_single(data_file: &PathBuf, output_file: &PathBuf, ratio: f32) -> Result<(), Error> {
+    let data = read_pathbuf_to_mem(data_file).unwrap();
+    let mut output_bytes: Vec<u8> = Vec::new();
+
+    for (_line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        let mut rng = rand::thread_rng();
+        let random_float = rng.gen::<f32>();
+        if ratio <= random_float {
+            output_bytes.extend(line.as_bytes());
+            output_bytes.push(b'\n');
+        }
+    }
+    if output_bytes.len() > 0 {
+        write_mem_to_pathbuf(&output_bytes, output_file).unwrap()
+    }
+    Ok(())
+
+
+
+}
+
+
 
 
 /*=================================================================
@@ -1940,8 +1999,9 @@ fn main() {
         }
 
 
-        Commands::PartitionTokens {input_dir, output_dir, mb_size} => {
-            partition_npy_tokens(input_dir, output_dir, mb_size)
+
+        Commands::Subsample {input_dir, output_dir, ratio} => {
+            subsample(input_dir, output_dir, *ratio)
         }
 
 
