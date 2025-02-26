@@ -1922,7 +1922,7 @@ fn subsample_single(data_file: &PathBuf, output_file: &PathBuf, ratio: f32) -> R
         let line = line.unwrap();
         let mut rng = rand::thread_rng();
         let random_float = rng.gen::<f32>();
-        if ratio <= random_float {
+        if random_float <= ratio {
             output_bytes.extend(line.as_bytes());
             output_bytes.push(b'\n');
         }
