@@ -1870,8 +1870,10 @@ fn partition_npy_tokens(input_dir: &PathBuf, output_dir: &PathBuf, mb_size: usiz
 
 
 fn partition_npy_tokens_single(data_file: &PathBuf, output_file_base: &PathBuf, mb_size: usize) -> Result<(), Error> {
+    Ok(())
+    /*
     let contents = read_pathbuf_to_mem(data_file).unwrap().into_inner().into_inner();
-    for (line_num, line) in contents.lines();
+    for (line_num, line) in contents.lines() 
 
     let chunk_token_size = mb_size / 4;
     let num_tokens = contents.len() / 4;
@@ -1886,6 +1888,7 @@ fn partition_npy_tokens_single(data_file: &PathBuf, output_file_base: &PathBuf, 
         write_mem_to_pathbuf(chunk_contents, &output_file).unwrap();
     });
     Ok(())
+    */
 
 }
 
