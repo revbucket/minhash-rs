@@ -1353,6 +1353,9 @@ fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathB
                     output_bytes.extend(line.as_bytes());
                     output_bytes.push(b'\n');                    
                 }
+            } else {
+                output_bytes.extend(line.as_bytes());
+                output_bytes.push(b'\n');
             }
         }
         line_num += 1;
@@ -1360,6 +1363,7 @@ fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathB
 
     if output_bytes.len() > 0 {
         let output_filename = get_output_filename(path, input_directory, output_directory).unwrap();
+
         write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
     }
 
