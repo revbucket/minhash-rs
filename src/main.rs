@@ -725,7 +725,6 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
     let edge_groups = gather_groups(config_obj.working_dir.clone().join("sig_storage")).unwrap(); //(sigchunk, band_id) -> [(sigfile)]
     let single_band_id = edge_groups.iter().next().unwrap().key().1;
     let singleton_map : Option<DashMap<usize, usize>> = Some(DashMap::new()); // maps path_id -> max line_num 
-
     // Then build the cliques for each group of (sigchunk, band_id) -- across all files!
 
     println!("Starting edge collection...");
@@ -863,7 +862,7 @@ fn save_singletons(max_lines_per_doc: DashMap<usize, usize>, singleton_path: &Pa
         .par_iter()
         .flat_map(|r| {
             let key_bytes: u64 = (*r.key()) as u64;
-            let val_bytes: u64 = (*r.value() + 1) as u64;
+            let val_bytes: u64 = (*r.value() + 1) as u64; // <--- important, +1 here so this saves #lines, not max idx!
             vec![key_bytes.to_le_bytes(), val_bytes.to_le_bytes()]
         })
         .flat_map(|a| a)
@@ -1059,7 +1058,7 @@ fn load_singletons(singleton_path: &PathBuf) -> Result<Vec<(usize, usize)>, Erro
 fn add_singletons_to_uf(singletons: Vec<(usize, usize)>, uf: &UFRush, line_size: usize) -> Result<(), Error> {
     let pbar = build_pbar(singletons.len(), "Singleton paths");
     singletons.par_iter().for_each(|(path_id, max_line)| {
-        for line_num in 0..(max_line+1) {
+        for line_num in 0..(*max_line) {
             let cur_id = pair2docid((*path_id, line_num), line_size);
             uf.find(cur_id);
         }
@@ -1223,19 +1222,20 @@ fn parse_kill_file(kill_file: &PathBuf) -> Result<DashMap<usize, Vec<usize>>, Er
 }
 
 
-fn collect_annotate_list(cc_map: &DashMap<usize, Vec<(usize, usize)>>) -> DashMap<usize, Vec<(usize, usize, usize)>> {
+fn collect_annotate_list(cc_map: &DashMap<usize, Vec<(usize, usize)>>) -> DashMap<usize, Vec<(usize, usize, usize, usize)>> {
 
-    let annotate_list: DashMap<usize, Vec<(usize, usize, usize)>> = DashMap::new();
+    let annotate_list: DashMap<usize, Vec<(usize, usize, usize, usize)>> = DashMap::new();
     // cc map is {cc_id -> <(path_id, line_num)>}
-    // annotate list is {path_id -> <(line_num, cc_size, cc_id)}
-
+    // annotate list is {path_id -> <(line_num, cc_size, cc_id, cc_idx)}
+    let true_cc_id = AtomicUsize::new(0);
     let pbar = build_pbar(cc_map.len(), "CC's");
     cc_map.par_iter().for_each(|entry| {
-        let cc_id = *entry.key();
+        let cc_id = true_cc_id.fetch_add(1, Ordering::SeqCst); 
         let cc_els = entry.value();
         let cc_size = cc_els.len();
-        for (path_id, line_num) in cc_els {
-            annotate_list.entry(*path_id).or_default().push((*line_num, cc_size, cc_id));
+
+        for (cc_idx, (path_id, line_num)) in cc_els.into_iter().enumerate() {
+            annotate_list.entry(*path_id).or_default().push((*line_num, cc_size, cc_id, cc_idx));
         }
         pbar.inc(1);
     });
@@ -1244,7 +1244,7 @@ fn collect_annotate_list(cc_map: &DashMap<usize, Vec<(usize, usize)>>) -> DashMa
 }
 
 
-fn save_annotate_files(anno_list: DashMap<usize, Vec<(usize, usize, usize)>>, anno_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
+fn save_annotate_files(anno_list: DashMap<usize, Vec<(usize, usize, usize, usize)>>, anno_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
     // anno list is {path_id -> <(line_num, cc_size, cc_id)>}
 
 
@@ -1268,14 +1268,15 @@ fn save_annotate_files(anno_list: DashMap<usize, Vec<(usize, usize, usize)>>, an
     anno_list.par_iter().for_each(|entry| {
         let path_id = entry.key();
         let chunk_id = path_id_2_chunk_id.get(path_id).unwrap();
-        let trips: &Vec<(usize, usize, usize)> = entry.value();
-        let mut contents: Vec<u8> = Vec::with_capacity(2 * usize_size + 3 * usize_size * trips.len());
+        let quads: &Vec<(usize, usize, usize, usize)> = entry.value();
+        let mut contents: Vec<u8> = Vec::with_capacity(2 * usize_size + 4 * usize_size * quads.len());
         contents.extend_from_slice(&path_id.to_le_bytes());
 
-        for (line_num, cc_size, cc_id) in trips {
+        for (line_num, cc_size, cc_id, cc_idx) in quads {
             contents.extend_from_slice(&line_num.to_le_bytes());
             contents.extend_from_slice(&cc_size.to_le_bytes());
             contents.extend_from_slice(&cc_id.to_le_bytes());
+            contents.extend_from_slice(&cc_idx.to_le_bytes())
         }
         contents.extend_from_slice(&terminus);
         writer.write_line(0, contents, *chunk_id).unwrap();
@@ -1462,8 +1463,8 @@ fn annotate(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Resu
     Ok(())    
 }
 
-fn parse_annotate_file(annotate_file: &PathBuf) -> Result<DashMap<usize, DashMap<usize, (usize, usize)>>, Error> {
-    let annotate_list: DashMap<usize, DashMap<usize,  (usize, usize)>> = DashMap::new();
+fn parse_annotate_file(annotate_file: &PathBuf) -> Result<DashMap<usize, DashMap<usize, (usize, usize, usize)>>, Error> {
+    let annotate_list: DashMap<usize, DashMap<usize,  (usize, usize, usize)>> = DashMap::new();
     let contents = read_pathbuf_to_mem(annotate_file).unwrap().into_inner().into_inner();
 
     let terminus = usize::MAX.to_le_bytes();
@@ -1486,12 +1487,12 @@ fn parse_annotate_file(annotate_file: &PathBuf) -> Result<DashMap<usize, DashMap
 
     let pbar = build_pbar(groups.len(), "annotate groups");
     for group in groups {
-        let group_map: DashMap<usize, (usize, usize)> = DashMap::new();
+        let group_map: DashMap<usize, (usize, usize, usize)> = DashMap::new();
         let path_id = group[0];
-        for idx in 0..(group.len() / 3) {
-            let line_num = group[idx * 3 + 1];
-            let pair: (usize, usize) = (group[idx * 3 + 2], group[idx * 3 + 3]);
-            group_map.insert(line_num, pair);
+        for idx in 0..(group.len() / 4) {
+            let line_num = group[idx * 4 + 1];
+            let trip: (usize, usize, usize) = (group[idx * 4 + 2], group[idx * 4 + 3], group[idx * 4 + 4]);
+            group_map.insert(line_num, trip);
         }
         annotate_list.insert(path_id, group_map);
         pbar.inc(1);
@@ -1501,7 +1502,7 @@ fn parse_annotate_file(annotate_file: &PathBuf) -> Result<DashMap<usize, DashMap
 }
 
 
-fn annotate_path(input_filename: &PathBuf, annotate_map: &DashMap<usize, (usize, usize)>, input_dir: &PathBuf, output_dir: &PathBuf) -> Result<usize, Error> {
+fn annotate_path(input_filename: &PathBuf, annotate_map: &DashMap<usize, (usize, usize, usize)>, input_dir: &PathBuf, output_dir: &PathBuf) -> Result<usize, Error> {
     let data = read_pathbuf_to_mem(input_filename).unwrap();
     let mut output_bytes: Vec<u8> =  Vec::new();
     let mut seen = 0;
@@ -1510,8 +1511,8 @@ fn annotate_path(input_filename: &PathBuf, annotate_map: &DashMap<usize, (usize,
         let line = line.unwrap();
         if annotate_map.contains_key(&line_num) {
             let mut line_json: Value = serde_json::from_str(&line).unwrap();
-            let (cc_size, cc_id) = *annotate_map.get(&line_num).unwrap().value();
-            let minhash_attrs = json!({"cc_size": cc_size+0, "cc_id": cc_id+0});
+            let (cc_size, cc_id, cc_idx) = *annotate_map.get(&line_num).unwrap().value();
+            let minhash_attrs = json!({"cc_size": cc_size, "cc_id": cc_id, "cc_idx": cc_idx});
             line_json["minhash"] = minhash_attrs;
             output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
         } else {
