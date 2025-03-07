@@ -11,7 +11,7 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use serde_yaml;
 use sha2::{Digest, Sha256};
 use tiktoken_rs::{CoreBPE, p50k_base};
@@ -208,6 +208,18 @@ enum Commands {
         num_path_chunks: usize
     },
 
+    Annotate {
+        // Annotates jsonls with cc_size and cc_id
+        #[arg(required=true, long)]
+        config: PathBuf, 
+
+        #[arg(long, default_value_t=0)]
+        path_chunk: usize,
+
+        #[arg(long, default_value_t=1)]
+        num_path_chunks: usize        
+    },
+
     TrueJacc {
         #[arg(required=true, long)]
         config: PathBuf
@@ -250,7 +262,9 @@ struct Config {
     #[serde(default)]
     exact_override: bool,
     #[serde(default)]
-    concat_key: Option<Vec<String>>
+    concat_key: Option<Vec<String>>,
+    #[serde(default)]
+    annotate_only: bool
 
 }
 
@@ -886,12 +900,22 @@ It creates the connected-components files and the kill files
     └── kill/
        └── chunk_ZZZ.kill.bin    
 
-    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewd as a single 
+    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewed as a single 
     array are is a concatenation of subarrays like
 
         `[path_id, kill_line_1, kill_line_2, ..., kill_line_N, terminus]`
 
     where each are u64s and terminus is u64::MAX
+
+    ----- annotate helpers -----
+    working_dir/
+    └── annotate/
+       └── chunk_ZZZ.annotate.bin        
+
+    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewd as a single 
+    array are is a concatenation of subarrays like
+
+
 */
 
 
@@ -939,16 +963,27 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
         cc_map.entry(*key).or_default().push((*path_id, *line_num));
         pbar.inc(1);
     });
-
     let cc_dir = config_obj.working_dir.clone().join("ccs");
-    println!("CC DIR {:?}", cc_dir);
     save_all_ccs(&cc_map, &cc_dir, config_obj.num_sig_chunks).unwrap();
-        
-    let kill_list = collect_kill_list(cc_map);
-    let kill_dir = config_obj.working_dir.clone().join("kill");
-    save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
     println!("Organized and saved ccs in {:?} secs", start_cc.elapsed().as_secs());
+    
 
+
+    let start_save_anno = Instant::now();
+    if config_obj.annotate_only {
+        println!("Starting annotation helper...");
+        let anno_map = collect_annotate_list(&cc_map);
+        let anno_dir = config_obj.working_dir.clone().join("anontate");
+        save_annotate_files(anno_map, &anno_dir, &file_map, num_path_chunks).unwrap();
+
+        println!("Finished annotation helper in {:?} secs", start_save_anno.elapsed().as_secs());
+    } else {
+        println!("Starting kill helper...");
+        let kill_list = collect_kill_list(cc_map);
+        let kill_dir = config_obj.working_dir.clone().join("kill");
+        save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();        
+        println!("Finished kill helper in {:?} secs", start_save_anno.elapsed().as_secs());
+    }     
 
     println!("Finished all unionfind stuff in {:?} seconds" , start_main.elapsed().as_secs());
     Ok(())
@@ -1188,9 +1223,75 @@ fn parse_kill_file(kill_file: &PathBuf) -> Result<DashMap<usize, Vec<usize>>, Er
 }
 
 
+fn collect_annotate_list(cc_map: &DashMap<usize, Vec<(usize, usize)>>) -> DashMap<usize, Vec<(usize, usize, usize)>> {
+
+    let annotate_list: DashMap<usize, Vec<(usize, usize, usize)>> = DashMap::new();
+    // cc map is {cc_id -> <(path_id, line_num)>}
+    // annotate list is {path_id -> <(line_num, cc_size, cc_id)}
+
+    let pbar = build_pbar(cc_map.len(), "CC's");
+    cc_map.par_iter().for_each(|entry| {
+        let cc_id = *entry.key();
+        let cc_els = entry.value();
+        let cc_size = cc_els.len();
+        for (path_id, line_num) in cc_els {
+            annotate_list.entry(*path_id).or_default().push((*line_num, cc_size, cc_id));
+        }
+        pbar.inc(1);
+    });
+
+    annotate_list
+}
+
+
+fn save_annotate_files(anno_list: DashMap<usize, Vec<(usize, usize, usize)>>, anno_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
+    // anno list is {path_id -> <(line_num, cc_size, cc_id)>}
+
+
+    // Map path id to chunk id
+    let path_id_2_chunk_id : DashMap<usize, usize> = DashMap::new();
+    for chunk_id in 0..num_path_chunks {
+        let path_chunk = file_map.get_path_chunk(chunk_id, num_path_chunks);
+        path_chunk.par_iter().for_each(|entry| {
+            let path_id = entry.1;
+            path_id_2_chunk_id.insert(path_id, chunk_id);
+        });        
+    }
+
+
+    // Then loop through anno list and write as we go    
+    let writer = GenWriter::new(anno_dir, num_path_chunks, "annotate");
+    let pbar = build_pbar(anno_list.len(), "Writing annotation list");
+    let terminus = usize::MAX.to_le_bytes();
+    let usize_size = std::mem::size_of::<usize>();
+
+    anno_list.par_iter().for_each(|entry| {
+        let path_id = entry.key();
+        let chunk_id = path_id_2_chunk_id.get(path_id).unwrap();
+        let trips: &Vec<(usize, usize, usize)> = entry.value();
+        let mut contents: Vec<u8> = Vec::with_capacity(2 * usize_size + 3 * usize_size * trips.len());
+        contents.extend_from_slice(&path_id.to_le_bytes());
+
+        for (line_num, cc_size, cc_id) in trips {
+            contents.extend_from_slice(&line_num.to_le_bytes());
+            contents.extend_from_slice(&cc_size.to_le_bytes());
+            contents.extend_from_slice(&cc_id.to_le_bytes());
+        }
+        contents.extend_from_slice(&terminus);
+        writer.write_line(0, contents, *chunk_id).unwrap();
+        pbar.inc(1);
+    });
+    writer.finish().unwrap();
+
+    Ok(())
+}
+
+
+
+
 
 /*=================================================================
-=                      PHASE 5: CLEAN DUPLICATES                  =
+=                      PHASE 5a: CLEAN DUPLICATES                 =
 =================================================================*/
 /* MULTINODE PARALLELISM ON PATHS
     This cleans the duplicates out from the data. 
@@ -1294,7 +1395,10 @@ fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathB
                     output_bytes.extend(line.as_bytes());
                     output_bytes.push(b'\n');                    
                 }
-            }
+            } else {
+                output_bytes.extend(line.as_bytes());
+                output_bytes.push(b'\n');
+            }            
         }
         line_num += 1;
     }
@@ -1306,6 +1410,125 @@ fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathB
 
     Ok((lines_removed, line_num))
 }
+
+/*=================================================================
+=                      PHASE 5b: CLEAN DUPLICATES                 =
+=================================================================*/
+/* MULTINODE PARALLELISM ON PATHS
+    This annotates the jsonls with cc_size and cc_id
+    It simply requires the outputs of the previous steps (namely the FileMap in step 1, and the 
+    .kill.bin files in step 4).
+
+    It will copy over (annotated) files from the input_dir to the output_dir (as specified by the config)
+*/
+
+fn annotate(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
+    println!("Starting CC annotation...");
+    let start_main = Instant::now();
+    let config_obj = read_config(config).unwrap();
+
+
+    let working_dir = config_obj.working_dir; 
+    let input_dir = config_obj.local_input; 
+    let output_dir = config_obj.output_dir; 
+    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
+    let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);
+    let annotate_dir = working_dir.clone().join("anontate");
+
+
+
+    // Parse the kill file into a map from path_id -> [lines to kill]
+    println!("Reading annotate file from disk...");
+    let start_annotate_read = Instant::now();
+    let annotate_file = GenWriter::get_filename(&annotate_dir, path_chunk, "annotate");
+    let annotate_list = parse_annotate_file(&annotate_file).unwrap();
+    println!("Parsed annotate file in {:?} seconds", start_annotate_read.elapsed().as_secs());
+        
+
+    println!("Annotating data");
+    let start_annotate_write = Instant::now();
+    let pbar = build_pbar(path_chunk_files.len(), "Paths");
+    let total_seen_docs = AtomicUsize::new(0);
+    path_chunk_files.par_iter().for_each(|(path, path_id)| {
+        let binding = annotate_list.entry(*path_id).or_default();
+        let this_annotate_map = binding.value();
+        let seen = annotate_path(&input_dir.clone().join(path), &this_annotate_map, &input_dir, &output_dir).unwrap();
+        total_seen_docs.fetch_add(seen, Ordering::SeqCst);
+        pbar.inc(1);
+
+    });
+    println!("Annotated {:?} docs in {:?} paths in {:?} seconds", total_seen_docs.into_inner(), path_chunk_files.len(), start_annotate_write.elapsed().as_secs());
+    println!("Did full annotate flow in {:?} seconds", start_main.elapsed().as_secs());
+    Ok(())    
+}
+
+fn parse_annotate_file(annotate_file: &PathBuf) -> Result<DashMap<usize, DashMap<usize, (usize, usize)>>, Error> {
+    let annotate_list: DashMap<usize, DashMap<usize,  (usize, usize)>> = DashMap::new();
+    let contents = read_pathbuf_to_mem(annotate_file).unwrap().into_inner().into_inner();
+
+    let terminus = usize::MAX.to_le_bytes();
+    let usize_size = std::mem::size_of::<usize>();
+
+
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut cur : Vec<usize> = Vec::new();
+    let pbar = build_pbar(contents.len() / usize_size, "annotate file chunks");
+
+    for chunk in contents.chunks_exact(usize_size) {
+        if chunk == terminus {
+            groups.push(cur);
+            cur = Vec::new();
+        } else {
+            cur.push(u64::from_le_bytes(chunk.try_into().unwrap()) as usize);
+        }
+        pbar.inc(1);
+    }
+
+    let pbar = build_pbar(groups.len(), "annotate groups");
+    for group in groups {
+        let group_map: DashMap<usize, (usize, usize)> = DashMap::new();
+        let path_id = group[0];
+        for idx in 0..(group.len() / 3) {
+            let line_num = group[idx * 3 + 1];
+            let pair: (usize, usize) = (group[idx * 3 + 2], group[idx * 3 + 3]);
+            group_map.insert(line_num, pair);
+        }
+        annotate_list.insert(path_id, group_map);
+        pbar.inc(1);
+    }
+
+    Ok(annotate_list)
+}
+
+
+fn annotate_path(input_filename: &PathBuf, annotate_map: &DashMap<usize, (usize, usize)>, input_dir: &PathBuf, output_dir: &PathBuf) -> Result<usize, Error> {
+    let data = read_pathbuf_to_mem(input_filename).unwrap();
+    let mut output_bytes: Vec<u8> =  Vec::new();
+    let mut seen = 0;
+
+    for (line_num, line) in data.lines().enumerate() {
+        let line = line.unwrap();
+        if annotate_map.contains_key(&line_num) {
+            let mut line_json: Value = serde_json::from_str(&line).unwrap();
+            let (cc_size, cc_id) = *annotate_map.get(&line_num).unwrap().value();
+            let minhash_attrs = json!({"cc_size": cc_size+0, "cc_id": cc_id+0});
+            line_json["minhash"] = minhash_attrs;
+            output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
+        } else {
+            output_bytes.extend(line.as_bytes());
+        }
+        output_bytes.push(b'\n');
+        seen += 1;
+    }
+
+    if output_bytes.len() > 0 {
+        let output_filename = get_output_filename(input_filename, input_dir, output_dir).unwrap();
+        write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
+    }
+
+    Ok(seen)
+}
+
 
 
 
@@ -1436,12 +1659,18 @@ fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
 
 fn minhash(config: &PathBuf) -> Result<(), Error> {
     // Note: this is only for SMALL runs. We set some hyperparameters for you, and this isn't optimized for these use cases
-
+    let config_obj = read_config(config).unwrap();
     build_file_map(&config).unwrap();
     hash_only(&config, 0, 1).unwrap();
     gather_edges(&config).unwrap();
     build_uf(&config, 1).unwrap();
-    uf_size_prune(&config, 0, 1).unwrap();
+
+
+    if config_obj.annotate_only {
+        annotate(config, 0, 1).unwrap();
+    } else {
+        uf_size_prune(&config, 0, 1).unwrap();     
+    }
 
     Ok(())
 
@@ -1484,6 +1713,10 @@ fn main() {
 
         Commands::UfSizePrune {config, path_chunk, num_path_chunks} => {
             uf_size_prune(config, *path_chunk, *num_path_chunks)
+        },
+
+        Commands::Annotate {config, path_chunk, num_path_chunks} => {
+            annotate(config, *path_chunk, *num_path_chunks)
         },
 
         Commands::TrueJacc {config} => {
