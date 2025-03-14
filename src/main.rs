@@ -33,9 +33,11 @@ use std::time::Instant;
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
+use crate::exact_dedup::exact_dedup;
 
 pub mod storage;
 pub mod uf_rush2;
+pub mod exact_dedup;
 
 const BIG_PRIME: u64 = 18446744073709551557;
 const MAX_HASH: u64 = BIG_PRIME;
@@ -223,6 +225,11 @@ enum Commands {
     TrueJacc {
         #[arg(required=true, long)]
         config: PathBuf
+    },
+
+    ExactDedup {
+        #[arg(required=true, long)]
+        config: PathBuf
     }
 
 }
@@ -351,6 +358,7 @@ impl OmniTokenizer {
 */
 
 
+
 fn build_file_map(config: &PathBuf) -> Result<(), Error> {
     /*
     - Config is the path to the json minhash config
@@ -358,18 +366,19 @@ fn build_file_map(config: &PathBuf) -> Result<(), Error> {
     which is a .json.gz that stores the 
     map from {file_name : pathbuf -> file_id : usize}
     */
-    let config_contents = read_pathbuf_to_mem(config).unwrap();
-    let config_value: serde_yaml::Value = serde_yaml::from_reader(config_contents).unwrap();
 
-    let working_dir = PathBuf::from(config_value["working_dir"].as_str().unwrap());
-    create_dir_all(&working_dir).unwrap();
-
-
-    let local_input = PathBuf::from(config_value["local_input"].as_str().unwrap());
-    let remote_input = PathBuf::from(config_value["remote_input"].as_str().unwrap());
-    let file_map = FileMap::new(&local_input, &remote_input).unwrap();
-
+    let config_obj = read_config(config).unwrap();
+    let working_dir = config_obj.working_dir.clone();
+    create_dir_all(&working_dir).unwrap();   
+    let file_map = create_file_map(&config_obj).unwrap();
     file_map.save(&working_dir.join("filemap.json.gz"))
+}
+
+fn create_file_map(config_obj: &Config) -> Result<FileMap, Error> {
+    let local_input = config_obj.local_input.clone();
+    let remote_input = config_obj.remote_input.clone();
+    let file_map = FileMap::new(&local_input, &remote_input).unwrap();
+    Ok(file_map)   
 }
 
 /*=================================================================
@@ -1678,6 +1687,14 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
 }
 
 
+fn cmd_exact_dedup(config: &PathBuf) -> Result<(), Error> {
+    let config_obj = read_config(config).unwrap();
+    let file_map = create_file_map(&config_obj).unwrap();
+    exact_dedup(config, &file_map).unwrap();
+    Ok(())
+}
+
+
 /*=================================================================
 =                                 MAIN                            =
 =================================================================*/
@@ -1722,7 +1739,12 @@ fn main() {
 
         Commands::TrueJacc {config} => {
             get_true_jacc_small(config)
+        },
+
+        Commands::ExactDedup {config} => {
+            cmd_exact_dedup(config)
         }
+
 
 
 
