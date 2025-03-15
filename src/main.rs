@@ -34,10 +34,12 @@ use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
 use crate::exact_dedup::exact_dedup;
+use crate::dup_aware_subsample::duplicate_aware_subsample;
 
 pub mod storage;
 pub mod uf_rush2;
 pub mod exact_dedup;
+pub mod dup_aware_subsample;
 
 const BIG_PRIME: u64 = 18446744073709551557;
 const MAX_HASH: u64 = BIG_PRIME;
@@ -230,6 +232,11 @@ enum Commands {
     ExactDedup {
         #[arg(required=true, long)]
         config: PathBuf
+    },
+
+    DupAwareSubsample {
+        #[arg(required=true, long)]
+        config: PathBuf
     }
 
 }
@@ -370,14 +377,12 @@ fn build_file_map(config: &PathBuf) -> Result<(), Error> {
     let config_obj = read_config(config).unwrap();
     let working_dir = config_obj.working_dir.clone();
     create_dir_all(&working_dir).unwrap();   
-    let file_map = create_file_map(&config_obj).unwrap();
+    let file_map = create_file_map(&config_obj.local_input, &config_obj.remote_input).unwrap();
     file_map.save(&working_dir.join("filemap.json.gz"))
 }
 
-fn create_file_map(config_obj: &Config) -> Result<FileMap, Error> {
-    let local_input = config_obj.local_input.clone();
-    let remote_input = config_obj.remote_input.clone();
-    let file_map = FileMap::new(&local_input, &remote_input).unwrap();
+fn create_file_map(local_input: &PathBuf, remote_input: &PathBuf) -> Result<FileMap, Error> {
+    let file_map = FileMap::new(local_input, remote_input).unwrap();
     Ok(file_map)   
 }
 
@@ -1689,10 +1694,12 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
 
 fn cmd_exact_dedup(config: &PathBuf) -> Result<(), Error> {
     let config_obj = read_config(config).unwrap();
-    let file_map = create_file_map(&config_obj).unwrap();
+    let file_map = create_file_map(&config_obj.local_input, &config_obj.remote_input).unwrap();
     exact_dedup(config, &file_map).unwrap();
     Ok(())
 }
+
+
 
 
 /*=================================================================
@@ -1745,6 +1752,9 @@ fn main() {
             cmd_exact_dedup(config)
         }
 
+        Commands::DupAwareSubsample {config} => {
+            duplicate_aware_subsample(config)
+        }
 
 
 
