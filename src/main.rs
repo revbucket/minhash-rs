@@ -1693,9 +1693,7 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
 
 
 fn cmd_exact_dedup(config: &PathBuf) -> Result<(), Error> {
-    let config_obj = read_config(config).unwrap();
-    let file_map = create_file_map(&config_obj.local_input, &config_obj.remote_input).unwrap();
-    exact_dedup(config, &file_map).unwrap();
+    exact_dedup(config).unwrap();
     Ok(())
 }
 

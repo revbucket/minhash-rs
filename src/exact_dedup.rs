@@ -91,12 +91,13 @@ fn get_output_filename(input_path: &PathBuf, config_input_dir: &PathBuf, config_
 =                           EXACT DEDUP MINHASH                     =
 ===================================================================*/
 
-pub fn exact_dedup(config: &PathBuf, file_map: &FileMap) -> Result<(), Error> {
+pub fn exact_dedup(config: &PathBuf) -> Result<(), Error> {
 	println!("Starting exact dedup");
 	let start_main = Instant::now();
 
 	// Load the config and initialize things
 	let config_obj = read_ed_config(config).unwrap();
+	let file_map = FileMap::new(&config_obj.local_input, &config_obj.local_input).unwrap();
     let this_chunk = file_map.get_path_chunk(0, 1);    
 
     // Hash all documents and store in a dashmap by their sigs
