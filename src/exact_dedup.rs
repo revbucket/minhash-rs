@@ -107,7 +107,8 @@ pub fn exact_dedup(config: &PathBuf) -> Result<(), Error> {
     let doc_hash : DashMap<u64, Vec<(usize, usize)>> = DashMap::new();
     let total_docs : AtomicUsize = AtomicUsize::new(0);
     this_chunk.par_iter().for_each(|(path, path_id)| {
-    	let line_count = exact_dedup_hash(path, *path_id, &config_obj.text_field, &doc_hash).unwrap();
+    	let input_path = config_obj.local_input.clone().join(path);
+    	let line_count = exact_dedup_hash(&input_path, *path_id, &config_obj.text_field, &doc_hash).unwrap();
     	total_docs.fetch_add(line_count, Ordering::SeqCst);
     	pbar.inc(1);
     });
