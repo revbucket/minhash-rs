@@ -76,11 +76,15 @@ fn read_das_config(config_path: &PathBuf) -> Result<DupAwareSubsampleConfig, Err
 }
 
 fn get_output_filename(input_path: &PathBuf, config_input_dir: &PathBuf, config_output_dir: &PathBuf) -> Result<PathBuf, Error> {
-	// Cloned fxn, maybe this goes to mj_io?
-    let replaced = input_path.clone()
-        .strip_prefix(config_input_dir)
-        .ok()
-        .map(|stripped| config_output_dir.clone().join(stripped)).unwrap();
+    // First, check if the input_path is a simple filename or a path with the expected prefix
+    let replaced = match input_path.strip_prefix(config_input_dir) {
+        Ok(stripped) => config_output_dir.join(stripped),
+        Err(_) => {
+            // If the path doesn't have the prefix, assume it's just a filename and join it directly
+            config_output_dir.join(input_path.file_name().unwrap_or(input_path.as_os_str()))
+        }
+    };
+    
     Ok(replaced)
 }
 
@@ -174,7 +178,7 @@ fn reorg_doc_hash(doc_hash:  DashMap<u64, Vec<(usize, usize)>>, annotate_only: &
 	// note: cc_idx is which element of the cc it is [useful for deduping later on]
 
 	let lines_by_pathid : DashMap<usize, Vec<(usize, u64, usize, usize)>> = DashMap::new();
-	let pbar = build_pbar(lines_by_pathid.len(), "Ccs");
+	let pbar = build_pbar(doc_hash.len(), "Ccs");
 
 	doc_hash.par_iter().for_each(|entry| {
 		let cc_id = entry.key();
