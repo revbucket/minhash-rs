@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rand::Rng;
 
 use std::time::Instant;
-use mj_io::{read_pathbuf_to_mem, build_pbar, write_mem_to_pathbuf};
+use mj_io::{read_pathbuf_to_mem, build_pbar, write_mem_to_pathbuf, get_output_filename};
 
 use crate::storage::{FileMap};
 
@@ -75,19 +75,6 @@ fn read_das_config(config_path: &PathBuf) -> Result<DupAwareSubsampleConfig, Err
     Ok(config)
 }
 
-fn get_output_filename(input_path: &PathBuf, config_input_dir: &PathBuf, config_output_dir: &PathBuf) -> Result<PathBuf, Error> {
-    // First, check if the input_path is a simple filename or a path with the expected prefix
-    let replaced = match input_path.strip_prefix(config_input_dir) {
-        Ok(stripped) => config_output_dir.join(stripped),
-        Err(_) => {
-            // If the path doesn't have the prefix, assume it's just a filename and join it directly
-            config_output_dir.join(input_path.file_name().unwrap_or(input_path.as_os_str()))
-        }
-    };
-    
-    Ok(replaced)
-}
-
 
 
 
@@ -95,12 +82,19 @@ fn get_output_filename(input_path: &PathBuf, config_input_dir: &PathBuf, config_
 =                           EXACT DEDUP MINHASH                     =
 ===================================================================*/
 
-pub fn exact_dedup(config: &PathBuf) -> Result<(), Error> {
+pub fn exact_dedup(config: &PathBuf, input_dir_override: Option<PathBuf>, output_dir_override: Option<PathBuf>) -> Result<(), Error> {
 	println!("Starting exact dedup");
 	let start_main = Instant::now();
 
 	// Load the config and initialize things
-	let config_obj = read_ed_config(config).unwrap();
+	let mut config_obj = read_ed_config(config).unwrap();
+	if let Some(input_dir) = input_dir_override {
+		config_obj.local_input = input_dir;
+	}
+	if let Some(output_dir) = output_dir_override {
+		config_obj.output_dir = output_dir;
+	}
+
 	let file_map = FileMap::new(&config_obj.local_input, &config_obj.local_input).unwrap();
     let this_chunk = file_map.get_path_chunk(0, 1);    
 

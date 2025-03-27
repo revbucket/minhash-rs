@@ -231,7 +231,13 @@ enum Commands {
 
     ExactDedup {
         #[arg(required=true, long)]
-        config: PathBuf
+        config: PathBuf,
+
+        #[arg(long)]
+        input_dir_override: Option<PathBuf>,
+
+        #[arg(long)]
+        output_dir_override: Option<PathBuf>
     },
 
     DupAwareSubsample {
@@ -1692,9 +1698,9 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
 }
 
 
-fn cmd_exact_dedup(config: &PathBuf) -> Result<(), Error> {
-    exact_dedup(config).unwrap();
-    Ok(())
+fn cmd_exact_dedup(config: &PathBuf, input_dir_override: Option<PathBuf>, output_dir_override: Option<PathBuf>) -> Result<(), Error> {
+    exact_dedup(config, input_dir_override, output_dir_override).unwrap();
+    Ok(())1
 }
 
 
@@ -1746,8 +1752,8 @@ fn main() {
             get_true_jacc_small(config)
         },
 
-        Commands::ExactDedup {config} => {
-            cmd_exact_dedup(config)
+        Commands::ExactDedup {config, input_dir_override, output_dir_override} => {
+            cmd_exact_dedup(config, input_dir_override.clone(), output_dir_override.clone())
         }
 
         Commands::DupAwareSubsample {config} => {
