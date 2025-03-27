@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 // Internal crate imports
-use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar};
+use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
 use crate::exact_dedup::exact_dedup;
@@ -1374,14 +1374,6 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
     Ok(())
 }
 
-
-fn get_output_filename(input_path: &PathBuf, config_input_dir: &PathBuf, config_output_dir: &PathBuf) -> Result<PathBuf, Error> {
-    let replaced = input_path.clone()
-        .strip_prefix(config_input_dir)
-        .ok()
-        .map(|stripped| config_output_dir.clone().join(stripped)).unwrap();
-    Ok(replaced)
-}
 
 
 fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathBuf, output_directory: &PathBuf,

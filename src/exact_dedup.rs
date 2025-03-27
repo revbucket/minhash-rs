@@ -131,7 +131,7 @@ pub fn exact_dedup(config: &PathBuf, input_dir_override: Option<PathBuf>, output
    	let pbar = build_pbar(this_chunk.len(), "Paths");
    	this_chunk.par_iter().for_each(|(path, path_id)| {
    		let input_path = config_obj.local_input.clone().join(path);
-   		let output_path = get_output_filename(&path, &config_obj.local_input, &config_obj.output_dir).unwrap();
+   		let output_path = get_output_filename(&input_path, &config_obj.local_input, &config_obj.output_dir).unwrap();
    		let exact_dedup_lines: Vec<(usize, u64, usize, usize)> = lines_by_pathid.remove(&path_id).unwrap().1;
    		scrub_file(&input_path, &output_path, exact_dedup_lines, &config_obj.annotate_only).unwrap();   
    		pbar.inc(1);
