@@ -1700,7 +1700,7 @@ fn minhash(config: &PathBuf) -> Result<(), Error> {
 
 fn cmd_exact_dedup(config: &PathBuf, input_dir_override: Option<PathBuf>, output_dir_override: Option<PathBuf>) -> Result<(), Error> {
     exact_dedup(config, input_dir_override, output_dir_override).unwrap();
-    Ok(())1
+    Ok(())
 }
 
 
