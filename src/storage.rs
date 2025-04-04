@@ -26,6 +26,9 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::fs::{OpenOptions, File, create_dir_all};
+use std::ops::{BitOr, Shl};
+use num_traits::{PrimInt, FromPrimitive};
+
 use std::path::{PathBuf};
 use std::sync::{Arc, Mutex};
 use std::cmp::{PartialEq, Eq};
@@ -78,6 +81,10 @@ pub(crate) trait IntValue: Hash + Eq {
     fn from_bytes(value: Vec<u8>) -> Self where Self: Sized;
     fn as_bytes(&self) -> &[u8];
     fn as_usize(&self) -> usize;
+    fn as_u64(&self) -> u64;
+	fn as_uint<T>(&self) -> T
+    where
+        T: PrimInt + BitOr<Output = T> + Shl<Output = T> + FromPrimitive;    
 }
 
 #[derive(PartialEq, Eq)]
@@ -115,6 +122,27 @@ impl<const N: usize> IntValue for IntN<N> {
 	    }
 	    result
     }
+
+    fn as_u64(&self) -> u64 {
+	    let mut result: u64 = 0;
+	    for &byte in &self.bytes {
+	        result = (result << 8) | byte as u64;
+	    }
+	    result
+    }
+
+	fn as_uint<T>(&self) -> T 
+	where 
+	    T: PrimInt + BitOr<Output = T> + Shl<Output = T> + FromPrimitive,
+	{
+	    let mut result = T::zero();
+	    for &byte in &self.bytes {
+	        result = (result << T::from_u8(8).unwrap()) | T::from_u8(byte).unwrap();
+	    }
+	    result
+	}
+
+
 }
 
 impl<const N: usize> Hash for IntN<N> {
@@ -237,6 +265,31 @@ impl IntValueEnum {
         }
 
     }
+
+    pub(crate) fn as_uint<T>(&self) -> T 
+    where
+        T: PrimInt + BitOr<Output = T> + Shl<Output = T> + FromPrimitive {        
+        match self {
+            IntValueEnum::Int8(value) => value.as_uint::<T>(),
+            IntValueEnum::Int16(value) => value.as_uint::<T>(),
+            IntValueEnum::Int24(value) => value.as_uint::<T>(),
+            IntValueEnum::Int32(value) => value.as_uint::<T>(),
+            IntValueEnum::Int40(value) => value.as_uint::<T>(),
+            IntValueEnum::Int48(value) => value.as_uint::<T>(),
+            IntValueEnum::Int56(value) => value.as_uint::<T>(),
+            IntValueEnum::Int64(value) => value.as_uint::<T>(),
+            IntValueEnum::Int72(value) => value.as_uint::<T>(),
+            IntValueEnum::Int80(value) => value.as_uint::<T>(),
+            IntValueEnum::Int88(value) => value.as_uint::<T>(),
+            IntValueEnum::Int96(value) => value.as_uint::<T>(),
+            IntValueEnum::Int104(value) => value.as_uint::<T>(),
+            IntValueEnum::Int112(value) => value.as_uint::<T>(),
+            IntValueEnum::Int120(value) => value.as_uint::<T>(),
+            IntValueEnum::Int128(value) => value.as_uint::<T>(),
+            // Add more cases for other IntN types
+        }
+
+    }    
 
 
 }
