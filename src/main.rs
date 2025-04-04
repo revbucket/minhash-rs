@@ -973,8 +973,8 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     println!("Starting CC collection");
     let start_cc = Instant::now();
     let pbar = build_pbar(uf.nodes.len(), "Nodes");
-    uf.nodes.par_iter().for_each(|entry| {
-        let x = *entry.key();
+    let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
+    keys.into_par_iter().for_each(|x| {
         let parent = uf.find(x);
         if x != parent {
             let x_pair = docid2pair(x, line_size);
