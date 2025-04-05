@@ -744,22 +744,22 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
 
     // Gather the files into the proper groups (which should live in the same hash-space-universe)
     let edge_groups = gather_groups(config_obj.working_dir.clone().join("sig_storage")).unwrap(); //(sigchunk, band_id) -> [(sigfile)]
+    println!("Building singleton map...");
     let single_band_id = edge_groups.iter().next().unwrap().key().1;
-    let singleton_map : Option<DashMap<usize, usize>> = Some(DashMap::new()); // maps path_id -> max line_num 
+    let singleton_map : DashMap<usize, usize> = build_singleton_map(edge_groups.iter().next().unwrap().value(), sig_size, path_size, line_size);
+    save_singletons(singleton_map, &config_obj.working_dir.clone().join("edges").join("singletons.bin")).unwrap();
     // Then build the cliques for each group of (sigchunk, band_id) -- across all files!
-
+     
     println!("Starting edge collection...");
     let pbar = build_pbar(edge_groups.len(), "Band groups");
-    edge_groups.par_iter()
-        .for_each(|entry| {
-            let (sigchunk, band_id) = entry.key();
-            let singleton_map_opt = if *band_id == single_band_id {
-                &singleton_map
-            } else {
-                &None
-            };
-
-            let band_group = build_band_group(entry.value(), sig_size, path_size, line_size, &singleton_map_opt).unwrap();
+    // Collect keys into a Vec so we can use .with_min_len()
+    let edge_group_list: Vec<((usize, usize), Vec<PathBuf>)> = edge_groups.into_iter().collect();
+    
+    edge_group_list
+        .par_iter()
+        .with_min_len(edge_group_list.len() / 64) // only use half of CPUs
+        .for_each(|((sigchunk, band_id), value)| {
+            let band_group = build_band_group(value, sig_size, path_size, line_size).unwrap();
             let output_filename = config_obj.working_dir.clone()
                                   .join("edges")
                                   .join(format!("sigchunk_{:08}", sigchunk))
@@ -768,7 +768,6 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
             pbar.inc(1);
         });
 
-    save_singletons(singleton_map.unwrap(), &config_obj.working_dir.clone().join("edges").join("singletons.bin")).unwrap();
     println!("... Gathered edges in {:?} seconds", start_main.elapsed().as_secs());
     // And save these for future use
 
@@ -801,8 +800,30 @@ fn gather_groups(sig_storage: PathBuf) -> Result<DashMap<(usize, usize), Vec<Pat
     Ok(map)
 }
 
-fn build_band_group(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize, line_size: usize, 
-                    singleton_map_opt: &Option<DashMap<usize, usize>>) -> 
+fn build_singleton_map(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize, 
+                       line_size: usize) -> DashMap<usize, usize> {
+    let singleton_map : DashMap<usize, usize> = DashMap::new(); // maps path_id -> max line_num 
+
+    let entry_size = sig_size + path_size + line_size;
+
+    band_sigs.par_iter().for_each(|path| {
+        let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
+
+        contents.chunks(entry_size).for_each(|entry| {
+            let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_usize();
+            let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_usize();
+            singleton_map.entry(path_id).and_modify(|cur_max| {
+                if line_id > *cur_max {
+                    *cur_max = line_id;
+                }
+            }).or_insert(line_id);
+        });
+    });
+
+    singleton_map
+}
+
+fn build_band_group(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize, line_size: usize) -> 
     Result<Vec<Vec<(usize, usize)>>, Error> {
     // For a group of files that contain signatures within the same band (and a sig chunk)
     // Collects a list of (path_id: usize, line_id: usize) for each clique
@@ -822,14 +843,6 @@ fn build_band_group(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize,
             let path_id = IntValueEnum::from_bytes(entry[sig_size..sig_size+path_size].to_vec(), path_size).as_uint::<usize>();
             let line_id = IntValueEnum::from_bytes(entry[sig_size+path_size..].to_vec(), line_size).as_uint::<usize>();
             group_map.entry(sig).or_default().push((path_id, line_id));
-
-            if let Some(singleton_map) = singleton_map_opt {
-                singleton_map.entry(path_id).and_modify(|cur_max| {
-                    if line_id > *cur_max {
-                        *cur_max = line_id;
-                    }
-                }).or_insert(line_id);
-            }
         });
     });
     
