@@ -265,6 +265,7 @@ struct Config {
     // Engineery things
     num_sig_chunks: usize,
     num_docs: usize,
+    num_paths: usize,
     max_lines_per_path: usize,
     content_key: String,
 
@@ -443,7 +444,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     create_dir_all(&sig_storage).unwrap();
     let num_sig_chunks = config_obj.num_sig_chunks;
     let signature_writer = SignatureWriter::new(&sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
-    let path_size = to_byte_size(file_map.indices.len());
+    let path_size = to_byte_size(config_obj.num_paths);
     let line_size = to_byte_size(config_obj.max_lines_per_path);
     let sig_size = compute_sig_size(config_obj.num_docs);
 
@@ -737,7 +738,7 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
     // Load the config and initialize things
     let config_obj = read_config(config).unwrap();
     let file_map = FileMap::load(&PathBuf::from(config_obj.working_dir.clone()).join("filemap.json.gz")).unwrap();
-    let path_size = to_byte_size(file_map.indices.len());
+    let path_size = to_byte_size(config_obj.num_paths);
     let line_size = to_byte_size(config_obj.max_lines_per_path);
     let sig_size = compute_sig_size(config_obj.num_docs);
 
@@ -950,7 +951,7 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     // Load the config to initialize things
     let config_obj = read_config(config).unwrap();
     let file_map = FileMap::load(&PathBuf::from(config_obj.working_dir.clone()).join("filemap.json.gz")).unwrap();
-    let path_size = to_byte_size(file_map.indices.len());
+    let path_size = to_byte_size(config_obj.num_paths);
     let line_size = to_byte_size(config_obj.max_lines_per_path);
 
     // Build the union find and unite all the edges
