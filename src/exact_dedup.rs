@@ -448,8 +448,9 @@ pub fn get_exact_hash_signatures(config: &PathBuf, sig_prefix: &String, num_sig_
 			contents.extend(line_num_bytes);
 			contents.extend(hash_val_bytes); 
 			output_writer.write_line(0, contents, bucket).unwrap();
-			pbar.inc(1);
 		}
+		pbar.inc(1);
+
 	});
 	output_writer.finish().unwrap();
 
