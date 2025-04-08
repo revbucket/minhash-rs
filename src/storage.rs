@@ -80,8 +80,6 @@ pub(crate) trait IntValue: Hash + Eq {
     fn new(value: usize) -> Self where Self: Sized;
     fn from_bytes(value: Vec<u8>) -> Self where Self: Sized;
     fn as_bytes(&self) -> &[u8];
-    fn as_usize(&self) -> usize;
-    fn as_u64(&self) -> u64;
 	fn as_uint<T>(&self) -> T
     where
         T: PrimInt + BitOr<Output = T> + Shl<Output = T> + FromPrimitive;    
@@ -114,22 +112,6 @@ impl<const N: usize> IntValue for IntN<N> {
     fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }    
-
-    fn as_usize(&self) -> usize {
-	    let mut result: usize = 0;
-	    for &byte in &self.bytes {
-	        result = (result << 8) | byte as usize;
-	    }
-	    result
-    }
-
-    fn as_u64(&self) -> u64 {
-	    let mut result: u64 = 0;
-	    for &byte in &self.bytes {
-	        result = (result << 8) | byte as u64;
-	    }
-	    result
-    }
 
 	fn as_uint<T>(&self) -> T 
 	where 
@@ -242,29 +224,6 @@ impl IntValueEnum {
 
     }
 
-
-    pub(crate) fn as_usize(&self) -> usize {
-        match self {
-            IntValueEnum::Int8(value) => value.as_usize(),
-            IntValueEnum::Int16(value) => value.as_usize(),
-            IntValueEnum::Int24(value) => value.as_usize(),
-            IntValueEnum::Int32(value) => value.as_usize(),
-            IntValueEnum::Int40(value) => value.as_usize(),
-            IntValueEnum::Int48(value) => value.as_usize(),
-            IntValueEnum::Int56(value) => value.as_usize(),
-            IntValueEnum::Int64(value) => value.as_usize(),
-            IntValueEnum::Int72(value) => value.as_usize(),
-            IntValueEnum::Int80(value) => value.as_usize(),
-            IntValueEnum::Int88(value) => value.as_usize(),
-            IntValueEnum::Int96(value) => value.as_usize(),
-            IntValueEnum::Int104(value) => value.as_usize(),
-            IntValueEnum::Int112(value) => value.as_usize(),
-            IntValueEnum::Int120(value) => value.as_usize(),
-            IntValueEnum::Int128(value) => value.as_usize(),
-            // Add more cases for other IntN types
-        }
-
-    }
 
     pub(crate) fn as_uint<T>(&self) -> T 
     where

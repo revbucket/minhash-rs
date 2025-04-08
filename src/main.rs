@@ -2,7 +2,7 @@
 use ahash::RandomState;
 use anyhow::{Error, Result};
 use clap::{Parser, Subcommand};
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use glob::glob;
 use ndarray::Array1;
 use rand::prelude::*;
@@ -32,7 +32,7 @@ use std::time::Instant;
 // Internal crate imports
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
-use crate::uf_rush2::UFRush;
+use crate::uf_rush2::{UFRush, parent as uf_parent};
 use crate::exact_dedup::exact_dedup;
 use crate::dup_aware_subsample::duplicate_aware_subsample;
 
@@ -537,38 +537,6 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
 }
 
 
-fn process_path_set(path: &PathBuf, path_id: usize, ngram_size: usize, tokenizer_str: &str, tokensets: &DashMap<(usize, usize), HashSet<usize>>) -> Result<(), Error> {
-    let data = read_pathbuf_to_mem(path).unwrap();
-
-    let tokenizer = OmniTokenizer::new(tokenizer_str).unwrap();
-    for (line_num, line) in data.lines().enumerate() {
-        let line = line.unwrap();
-        let json: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));        
-        let text = json["text"].as_str().unwrap();
-        let Ok(tokens) = catch_unwind(|| preprocess_text(text, &tokenizer)) else {
-            println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num);
-            continue;
-        };
-        let mut ngram: VecDeque<usize> = VecDeque::with_capacity(ngram_size);
-        let mut ngram_count = 0;
-        let mut doc_ngrams : HashSet<usize> = HashSet::new();
-        for token in tokens {
-            ngram.push_back(token);
-            if ngram.len() >= ngram_size {
-                ngram_count += 1;
-                doc_ngrams.insert(hash_object(&ngram));
-                ngram.pop_front();
-            }
-        }
-        if ngram_count == 0 {
-            doc_ngrams.insert(hash_object(&ngram));
-        }
-        tokensets.insert((path_id, line_num), doc_ngrams);
-    }
-    Ok(())
-}
-
-
 fn hash_object<T: Hash>(obj: &T) -> usize {
     let mut hasher = DefaultHasher::new();
     obj.hash(&mut hasher);
@@ -967,46 +935,42 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     });
     println!("Built unionfind in {:?} secs", start_main.elapsed().as_secs());
 
-    // Then flip the union find to get the map from parent -> list of nodes 
-    // root -> [cc_el_1, ...,] (note, the value list does NOT include the )
-    let ccs: DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>> = DashMap::new();
-    println!("Starting CC collection");
-    let start_cc = Instant::now();
-    let pbar = build_pbar(uf.nodes.len(), "Nodes");
+    // First compress all paths in the union find
     let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
-    keys.into_par_iter().for_each(|x| {
-        let parent = uf.find(x);
-        if x != parent {
-            let x_pair = docid2pair(x, line_size);
-            let x_0 = IntValueEnum::new(x_pair.0, path_size);
-            let x_1 = IntValueEnum::new(x_pair.1, line_size);
-            let parent_pair = docid2pair(parent, line_size);
-            let parent_0 = IntValueEnum::new(parent_pair.0, path_size);
-            let parent_1 = IntValueEnum::new(parent_pair.1, line_size);
-
-            ccs.entry((parent_0, parent_1)).or_default().push((x_0, x_1));
-        }
+    let pbar = build_pbar(keys.len(), "Compressing UF Paths...");
+    keys.into_par_iter().for_each(|k| {
+        uf.find_path_compression(k);
         pbar.inc(1);        
     });
-    drop(uf); // explicitly drop the union find structure
-    println!("Build CCs in {:?} secs", start_cc.elapsed().as_secs());
+
+    // And then I can consume the uf nodes as we go 
+    let ccs : DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>> = DashMap::new();
+    uf.nodes.into_par_iter().for_each(|(k,v)| {
+        let (parent_path, parent_line) = docid2pair(uf_parent(v.load(Ordering::Relaxed)), line_size);
+        let (child_path, child_line) = docid2pair(k, line_size);
+        let parent_enums = (IntValueEnum::new(parent_path, path_size), IntValueEnum::new(parent_line, line_size));
+        let child_enums = (IntValueEnum::new(child_path, path_size), IntValueEnum::new(child_line, line_size));
+        if parent_enums != child_enums {
+            ccs.entry(parent_enums).or_default().push(child_enums);
+        }        
+    });
 
 
-    // Just save either the kill or annotation list 
+    // Then branch depending on whether we need annotations or kill files
     if config_obj.annotate_only {
         let start_anno = Instant::now();
         println!("Building annotation files");
-        let annotate_list = collect_annotate_list(ccs);
-        let anno_dir = config_obj.working_dir.clone().join("annotate");        
-        save_annotate_files(annotate_list, &anno_dir, &file_map, num_path_chunks).unwrap();
-        println!("Saved annotated data in {:?} secs", start_anno.elapsed().as_secs());
+        let anno_dir = config_obj.working_dir.clone().join("annotate");
+        let anno_list = collect_annotate_list(ccs);
+        save_annotate_files(anno_list, &anno_dir, &file_map, num_path_chunks).unwrap();
+        println!("Saved annotation data in {:?} secs", start_anno.elapsed().as_secs());
     } else {
         let start_kill = Instant::now();
         println!("Building kill files");
         let kill_list = collect_kill_list(ccs);
         let kill_dir = config_obj.working_dir.clone().join("kill");
         save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
-        println!("Saved kill list in {:?} secs", start_kill.elapsed().as_secs());
+        println!("Saved kill files in {:?} secs", start_kill.elapsed().as_secs());
     }
 
     println!("Finished all unionfind stuff in {:?} seconds" , start_main.elapsed().as_secs());
@@ -1033,21 +997,6 @@ fn add_edge_file_to_uf(edge_file: &PathBuf, uf: &UFRush, path_size: usize, line_
     });
 
     Ok(())
-}
-
-fn build_ccs(uf: UFRush, line_size: usize) -> Vec<((usize,usize), usize)> {
-    let size = uf.nodes.len();
-
-    let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
-    println!("LEN KEYS IS {:?}", keys.len());
-    println!("LINE SIZE IS {line_size}");
-    let pbar = build_pbar(size, "Docs");
-    keys.into_par_iter()
-    .map(|key| {
-        pbar.inc(1);
-        (docid2pair(key, line_size), uf.find(key))
-    })
-    .collect()
 }
 
 
@@ -1114,6 +1063,7 @@ fn save_kill_list(kill_list: DashMap<IntValueEnum, Vec<IntValueEnum>>, kill_dir:
 }
 
 
+
 fn parse_kill_file(kill_file: &PathBuf) -> Result<DashMap<usize, Vec<usize>>, Error> {
     let kill_list: DashMap<usize, Vec<usize>> = DashMap::new();
 
@@ -1168,9 +1118,6 @@ fn collect_annotate_list(cc_map: DashMap<(IntValueEnum, IntValueEnum), Vec<(IntV
 }
 
 
-
-
-
 fn save_annotate_files(anno_list: DashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum, IntValueEnum, IntValueEnum)>>, anno_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
     // anno list is {path_id -> <(line_num, cc_size, cc_id)>}
 
@@ -1211,8 +1158,6 @@ fn save_annotate_files(anno_list: DashMap<IntValueEnum, Vec<(IntValueEnum, IntVa
 
     Ok(())
 }
-
-
 
 
 
@@ -1464,7 +1409,7 @@ get_true_jacc_small: computes the actual jaccard similarity between all pairs of
     - each element in each list is a (path_id_0, line_id_0, path_id_1, line_id_1, jaccard_sim)
 
 */
-fn get_true_jacc_small(config: &PathBuf) -> Result<(), Error> {
+fn get_true_jacc_small(_config: &PathBuf) -> Result<(), Error> {
 
     return Ok(())
     /*
@@ -1567,7 +1512,7 @@ fn collect_pairwise_jaccards(cc_ngrams: DashMap<usize, Vec<HashSet<usize>>>) -> 
     */
 }
 
-
+#[allow(dead_code)]
 fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
     let cap = x.intersection(y).count();
     let cup = x.union(y).count();   

@@ -131,6 +131,33 @@ impl UFRush {
         x
     }
 
+
+    pub fn find_path_compression(&self, mut x: usize) -> usize {
+        self.nodes.entry(x).or_insert(AtomicUsize::new(x));
+
+        let mut root = x;
+        let mut root_node = self.nodes.get(&root).unwrap().load(Ordering::Relaxed);
+        while root != parent(root_node) {
+            root = parent(root_node);
+            root_node = self.nodes.get(&root).unwrap().load(Ordering::Relaxed);
+        }
+
+        while x != root {
+            let x_node = self.nodes.get(&x).unwrap().load(Ordering::Relaxed);
+            let x_parent = parent(x_node);
+            let x_new_node = encode(root, rank(x_node));
+            let _ = self.nodes.get(&x).unwrap().compare_exchange_weak(
+                x_node, 
+                x_new_node,
+                Ordering::Release,
+                Ordering::Relaxed
+            );
+            x = x_parent;
+        }
+        root
+    }
+
+
     /// Unites the subsets that contain `x` and `y`.
     ///
     /// If `x` and `y` are already in the same subset, no action is performed.
@@ -229,7 +256,7 @@ fn encode(parent: usize, rank: usize) -> usize {
 }
 
 /// Retrieves the parent node from an encoded `usize`.
-fn parent(n: usize) -> usize {
+pub fn parent(n: usize) -> usize {
     n & MAX_SIZE
 }
 
