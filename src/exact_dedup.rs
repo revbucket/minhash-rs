@@ -409,7 +409,7 @@ pub fn get_exact_hash_signatures(config: &PathBuf, sig_prefix: &String, num_sig_
 	let working_dir = config_obj.working_dir;
 	let local_input = config_obj.local_input;
 	let text_field = config_obj.text_field;
-	let file_map = FileMap::load(&working_dir.clone().join("file_map.json.gz")).unwrap();
+	let file_map = FileMap::load(&working_dir.clone().join("filemap.json.gz")).unwrap();
 	let extensions = Some(&[".jsonl.zst"][..]);
 
 	let files = expand_dirs(vec![local_input.clone()],
