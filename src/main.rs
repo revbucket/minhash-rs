@@ -981,47 +981,66 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     });
     println!("Built unionfind in {:?} secs", start_main.elapsed().as_secs());
 
+
     // Then flip the union find to get the map from parent -> list of nodes 
     // root -> [cc_el_1, ...,] (note, the value list does NOT include the )
-    let ccs: DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>> = DashMap::new();
     println!("Starting CC collection");
-    let start_cc = Instant::now();
-    let pbar = build_pbar(uf.nodes.len(), "Nodes");
-    let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
-    keys.into_par_iter().for_each(|x| {
-        let parent = uf.find(x);
-        if x != parent {
-            let x_pair = docid2pair(x, line_size);
-            let x_0 = IntValueEnum::new(x_pair.0, path_size);
-            let x_1 = IntValueEnum::new(x_pair.1, line_size);
-            let parent_pair = docid2pair(parent, line_size);
-            let parent_0 = IntValueEnum::new(parent_pair.0, path_size);
-            let parent_1 = IntValueEnum::new(parent_pair.1, line_size);
+    
+    let ccs: DashMap<usize, Vec<usize>> = DashMap::new();
+    let shards = uf.nodes.len() / 2500000000;
 
-            ccs.entry((parent_0, parent_1)).or_default().push((x_0, x_1));
-        }
-        pbar.inc(1);        
-    });
+    let start_cc = Instant::now();
+    for shard in 0..shards {
+
+        println!("Collecting keys");
+        let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
+
+        println!("Starting CC collection for shard {:?}", shard);
+        let start_cc_shard = Instant::now();
+        let pbar = build_pbar(keys.len(), "Nodes");
+
+        keys.into_par_iter().for_each(|key| {
+            let parent = uf.find(key);
+
+            if parent % shards == shard && key != parent {
+                ccs.entry(parent).or_default().push(key);
+            }
+            pbar.inc(1);
+        });
+        
+        let pbar = build_pbar(ccs.len(), "Roots");
+        // Clean up memory in uf.nodes by clearing the converted nodes
+        ccs.par_iter().for_each(|entry| {
+            let key = *entry.key();
+            if key % shards == shard {
+                entry.value().iter().for_each(|v| {
+                    uf.nodes.remove(&v);
+                });
+                uf.nodes.remove(&key);
+            }
+            pbar.inc(1);
+        });
+        println!("Finished shard {:?} in {:?} secs", shard, start_cc_shard.elapsed().as_secs());
+    }
     drop(uf); // explicitly drop the union find structure
     println!("Build CCs in {:?} secs", start_cc.elapsed().as_secs());
 
-
     // Just save either the kill or annotation list 
-    if config_obj.annotate_only {
-        let start_anno = Instant::now();
-        println!("Building annotation files");
-        let annotate_list = collect_annotate_list(ccs);
-        let anno_dir = config_obj.working_dir.clone().join("annotate");        
-        save_annotate_files(annotate_list, &anno_dir, &file_map, num_path_chunks).unwrap();
-        println!("Saved annotated data in {:?} secs", start_anno.elapsed().as_secs());
-    } else {
-        let start_kill = Instant::now();
-        println!("Building kill files");
-        let kill_list = collect_kill_list(ccs);
-        let kill_dir = config_obj.working_dir.clone().join("kill");
-        save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
-        println!("Saved kill list in {:?} secs", start_kill.elapsed().as_secs());
-    }
+    // if config_obj.annotate_only {
+    //     let start_anno = Instant::now();
+    //     println!("Building annotation files");
+    //     let annotate_list = collect_annotate_list(ccs);
+    //     let anno_dir = config_obj.working_dir.clone().join("annotate");        
+    //     save_annotate_files(annotate_list, &anno_dir, &file_map, num_path_chunks).unwrap();
+    //     println!("Saved annotated data in {:?} secs", start_anno.elapsed().as_secs());
+    // } else {
+    let start_kill = Instant::now();
+    println!("Building kill files");
+    let kill_list = collect_kill_list(ccs);
+    let kill_dir = config_obj.working_dir.clone().join("kill");
+    save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
+    println!("Saved kill list in {:?} secs", start_kill.elapsed().as_secs());
+    // }
 
     println!("Finished all unionfind stuff in {:?} seconds" , start_main.elapsed().as_secs());
     Ok(())
@@ -1081,15 +1100,24 @@ fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
 
 
 
-fn collect_kill_list(cc_map: DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>>) -> DashMap<IntValueEnum, Vec<IntValueEnum>> {
+fn collect_kill_list(cc_map: DashMap<usize, Vec<usize>>) -> DashMap<IntValueEnum, Vec<IntValueEnum>> {
     let pbar = build_pbar(cc_map.len(), "Organizing kill ccs");
     let kill_list : DashMap<IntValueEnum, Vec<IntValueEnum>> = DashMap::new();
+    
+    // Define line_size and path_size
+    let line_size = 4; // Assuming default size of 4 bytes for lines
+    let path_size = 4; // Assuming default size of 4 bytes for paths
+    
     cc_map.into_par_iter().for_each(|(_, v)| {
         for el in v.into_iter() {
-            kill_list.entry(el.0).or_default().push(el.1);
+            let pair = docid2pair(el, line_size);
+            let path_id = IntValueEnum::new(pair.0, path_size);
+            let line_num = IntValueEnum::new(pair.1, line_size);
+            kill_list.entry(path_id).or_default().push(line_num);
         }
         pbar.inc(1);
     });
+
     kill_list
 }
 
