@@ -104,7 +104,7 @@ uf_size_prune() {
 
         ln -s /mnt/raid0/working_dir_global/* /mnt/raid0/working_dir
         rm /mnt/raid0/working_dir/filemap.json.gz
-        
+     	s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/global_minhash_dedup/filemaps/${shard}.filemap.json.gz  /mnt/raid0/working_dir/filemap.json.gz
         s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/documents/${shard}/*  /mnt/raid0/input_data/${shard}/
 
         cargo run --release -- uf-size-prune --config examples/fineweb_global_config.yaml
