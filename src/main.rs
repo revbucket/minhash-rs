@@ -943,8 +943,9 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
         pbar.inc(1);        
     });
 
+
     // And then I can consume the uf nodes as we go 
-    let ccs : DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>> = DashMap::new();
+    /*let ccs : DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>> = DashMap::new();
     uf.nodes.into_par_iter().for_each(|(k,v)| {
         let (parent_path, parent_line) = docid2pair(uf_parent(v.load(Ordering::Relaxed)), line_size);
         let (child_path, child_line) = docid2pair(k, line_size);
@@ -954,8 +955,12 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
             ccs.entry(parent_enums).or_default().push(child_enums);
         }        
     });
+    */
+    let kill_dir = config_obj.working_dir.clone().join("kill");
 
-
+    save_kill_list2(uf.nodes, &kill_dir, &file_map, num_path_chunks).unwrap();
+    return Ok(())
+    /*
     // Then branch depending on whether we need annotations or kill files
     if config_obj.annotate_only {
         let start_anno = Instant::now();
@@ -968,13 +973,13 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
         let start_kill = Instant::now();
         println!("Building kill files");
         let kill_list = collect_kill_list(ccs);
-        let kill_dir = config_obj.working_dir.clone().join("kill");
         save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
         println!("Saved kill files in {:?} secs", start_kill.elapsed().as_secs());
     }
 
     println!("Finished all unionfind stuff in {:?} seconds" , start_main.elapsed().as_secs());
     Ok(())
+    */
 }
 
 
@@ -1012,6 +1017,35 @@ fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
     let mask = (1 << (line_size * 8)) - 1;
     (docid >> (line_size * 8), docid & mask)
 
+}
+
+fn save_kill_list2(uf_nodes: DashMap<usize, AtomicUsize>, kill_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
+     // Map path id to chunk id
+     // Just do dumb writing things... 
+    let path_id_2_chunk_id : DashMap<u64, usize> = DashMap::new();
+    for chunk_id in 0..num_path_chunks {
+        let path_chunk = file_map.get_path_chunk(chunk_id, num_path_chunks);
+        path_chunk.par_iter().for_each(|entry| {
+            let path_id = entry.1 as u64;
+            path_id_2_chunk_id.insert(path_id, chunk_id);
+        });        
+    }
+    
+
+    let writer = GenWriter::new(kill_dir, num_path_chunks, "kill");
+    let pbar = build_pbar(uf_nodes.len(), "UF NODES");
+    uf_nodes.into_par_iter().for_each(|(k,v)| {
+        let k_bytes = k.to_le_bytes();
+        let path_id = path_id_2_chunk_id.get(&(uf_parent(k) as u64)).unwrap();
+        let v_bytes = v.load(Ordering::Relaxed).to_le_bytes();
+        let mut contents: Vec<u8> = Vec::new();
+        contents.extend(k_bytes);
+        contents.extend(v_bytes);
+        writer.write_line(0, contents, *path_id);
+        pbar.inc(1);
+    });
+
+    Ok(())
 }
 
 
