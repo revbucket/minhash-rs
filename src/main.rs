@@ -33,7 +33,7 @@ use std::time::Instant;
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
-use crate::exact_dedup::exact_dedup;
+use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures};
 use crate::dup_aware_subsample::duplicate_aware_subsample;
 
 pub mod storage;
@@ -243,6 +243,17 @@ enum Commands {
     DupAwareSubsample {
         #[arg(required=true, long)]
         config: PathBuf
+    },
+
+    ExactHashSignatures {
+        #[arg(required=true, long)]
+        config: PathBuf, 
+
+        #[arg(required=true, long)]
+        sig_prefix: String, 
+
+        #[arg(long, default_value_t=512)]
+        num_sig_chunks: usize
     }
 
 }
@@ -1752,7 +1763,9 @@ fn main() {
             duplicate_aware_subsample(config)
         }
 
-
+        Commands::ExactHashSignatures {config, sig_prefix, num_sig_chunks} => {
+            get_exact_hash_signatures(config, sig_prefix, *num_sig_chunks)
+        }
 
         _ => {Ok(())}
 

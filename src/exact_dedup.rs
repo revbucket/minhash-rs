@@ -16,11 +16,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use rand::Rng;
+use blake3;
 
 use std::time::Instant;
-use mj_io::{read_pathbuf_to_mem, build_pbar, write_mem_to_pathbuf, get_output_filename};
+use mj_io::{read_pathbuf_to_mem, build_pbar, write_mem_to_pathbuf, get_output_filename, expand_dirs};
 
-use crate::storage::{FileMap};
+use crate::storage::{FileMap, GenWriter };
 
 const EOT_u64: u64 = u64::MAX;
 const EOT: [u8;8] = EOT_u64.to_le_bytes();
@@ -266,6 +267,9 @@ fn save_ccs_by_size(doc_hash: &DashMap<u64, Vec<(usize, usize)>>, working_dir: &
 
 
 
+
+
+
 /*===========================================================================
 =                          DUPLICATE AWARE SUBSAMPLING                      =
 ===========================================================================*/
@@ -386,4 +390,72 @@ fn duplicate_aware_subsample_file(path: &PathBuf, output_path: &PathBuf, survivi
 
 	Ok((surviving_docs, total_docs))
 }
+
+
+
+/*=============================================================================
+=                                   MEGASCALE DUPAWARE                        =
+=============================================================================*/
+
+
+// Just a one-off thing to get signatures for all_dressed exact hashes. 
+// Creates files like hash_signatures/CC_dump/sig_XXX.sig.bin 
+
+// Where each entry is a (u32: path_id, u32: line_id, u128: signature)
+// and sig_XXX has XXX ranging from 0..1023, where each line is the signature % 1024
+
+pub fn get_exact_hash_signatures(config: &PathBuf, sig_prefix: &String, num_sig_chunks: usize) -> Result<(), Error> {
+	let config_obj = read_ed_config(config).unwrap();
+	let working_dir = config_obj.working_dir;
+	let local_input = config_obj.local_input;
+	let text_field = config_obj.text_field;
+	let file_map = FileMap::load(&working_dir.clone().join("file_map.json.gz")).unwrap();
+	let extensions = Some(&[".jsonl.zst"][..]);
+
+	let files = expand_dirs(vec![local_input.clone()],
+						    extensions).unwrap();
+	let start_main = Instant::now();
+
+	let sig_dir = working_dir.clone().join("u128_signatures").join(sig_prefix);
+	let output_writer = GenWriter::new(&sig_dir, num_sig_chunks, "sig");
+
+	println!("Starting hashing...");
+	let pbar = build_pbar(files.len(), "Paths");
+	files.par_iter().for_each(|p| {
+
+
+		let contents = read_pathbuf_to_mem(&p).unwrap();
+		for (line_num, line) in contents.lines().enumerate() {
+			let path_stem = p.strip_prefix(local_input.clone()).ok().map(|stripped| stripped.strip_prefix("/").unwrap_or(stripped)).unwrap();
+			let path_id =  file_map.indices.get(path_stem).unwrap();
+
+			let line = line.unwrap();
+			let json_obj: Value = serde_json::from_str(&line).unwrap();
+			let contents = json_obj.get(text_field.clone()).unwrap().as_str().unwrap();
+			let path_id_bytes = (*path_id as u32).to_le_bytes();
+			let line_num_bytes = (line_num as u32).to_le_bytes();
+			let hash = blake3::hash(contents.as_bytes());
+			let bytes = hash.as_bytes();
+			let mut result = 0u128;
+			for i in 0..16 {
+				result = (result << 8) | bytes[i] as u128;
+			}
+			let bucket = (result % (num_sig_chunks as u128)) as usize;
+			let hash_val_bytes = result.to_le_bytes();
+
+			let mut contents : Vec<u8> = Vec::new();
+			contents.extend(path_id_bytes);
+			contents.extend(line_num_bytes);
+			contents.extend(hash_val_bytes); 
+			output_writer.write_line(0, contents, bucket).unwrap();
+			pbar.inc(1);
+		}
+	});
+	output_writer.finish().unwrap();
+
+	println!("Finished hash in {:?} secs", start_main.elapsed().as_secs());
+	Ok(())
+}
+
+
 

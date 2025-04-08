@@ -1,5 +1,6 @@
 name: all_dressed_exact_dedup
-local_input: DUMMY_INPUT
-output_dir: DUMMY_OUTPUT
+local_input: /mnt/raid0/input
+output_dir: /mnt/raid0/output
 working_dir: /mnt/raid0/ed_working_dir
+remote_input: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed/english/
 text_field: text
