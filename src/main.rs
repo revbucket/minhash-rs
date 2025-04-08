@@ -1047,7 +1047,7 @@ fn save_kill_list2(uf_nodes: DashMap<usize, AtomicUsize>, kill_dir: &PathBuf, fi
         writer.write_line(0, contents, chunk_id).unwrap();
         pbar.inc(1);
     });
-
+    writer.finish().unwrap();
     Ok(())
 }
 
