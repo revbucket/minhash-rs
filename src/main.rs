@@ -18,7 +18,7 @@ use tiktoken_rs::{CoreBPE, p50k_base};
 use unicode_segmentation::UnicodeSegmentation;
 
 // Standard library
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs::{create_dir_all, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, Write};
@@ -200,7 +200,7 @@ enum Commands {
     },
 
 
-    UfSizePrune {
+    CleanFiles {
         // Prunes a dataset based on the connected component sizes:
         #[arg(required=true, long)]
         config: PathBuf, 
@@ -210,23 +210,6 @@ enum Commands {
 
         #[arg(long, default_value_t=1)]
         num_path_chunks: usize
-    },
-
-    Annotate {
-        // Annotates jsonls with cc_size and cc_id
-        #[arg(required=true, long)]
-        config: PathBuf, 
-
-        #[arg(long, default_value_t=0)]
-        path_chunk: usize,
-
-        #[arg(long, default_value_t=1)]
-        num_path_chunks: usize        
-    },
-
-    TrueJacc {
-        #[arg(required=true, long)]
-        config: PathBuf
     },
 
     ExactDedup {
@@ -284,7 +267,12 @@ struct Config {
     #[serde(default)]
     concat_key: Option<Vec<String>>,
     #[serde(default)]
-    annotate_only: bool
+    annotate_only: bool,
+    #[serde(default)]
+    annotate_key: Option<String>,
+    #[serde(default)]
+    remove_duplicates: bool
+
 
 }
 
@@ -321,6 +309,45 @@ fn get_nested_json_val(obj: &Value, key: &String) -> Result<String, Error> {
     }
 
     Ok(current.to_string())
+}
+
+
+fn set_nested_value(obj: &mut Value, path: &String, value: Value) -> Result<(), Error> {
+    let parts: Vec<&str> = path.split('.').collect();
+    
+    // Start with the root object
+    let mut current = obj;
+    
+    // Navigate through all parts except the last one
+    for (i, &part) in parts.iter().enumerate().take(parts.len() - 1) {
+        // Create objects as needed for the path
+        if !current.is_object() {
+            *current = json!({});
+        }
+        
+        // If the next level doesn't exist or isn't an object, create it
+        if !current.get(part).map_or(false, |v| v.is_object()) {
+            current[part] = json!({});
+        }
+        
+        // Move to the next level
+        current = current.get_mut(part).ok_or_else(|| {
+            format!("Failed to navigate to '{}' at position {}", part, i)
+        }).unwrap();
+    }
+  
+    // Set the value at the final location
+    let last_part = parts.last().unwrap();
+    
+    // Ensure we have an object at the current level
+    if !current.is_object() {
+        *current = json!({});
+    }
+    
+    // Set the value at the last part
+    current[*last_part] = value;
+    
+    Ok(())
 }
 
 
@@ -927,59 +954,40 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     //let singletons_path = config_obj.working_dir.clone().join("edges").join("singletons.bin");
     //let singletons = load_singletons(&singletons_path).unwrap();
     //add_singletons_to_uf(singletons, &uf, line_size).unwrap();
-
+    println!("Adding edges to UF...");
     let pbar = build_pbar(all_edge_files.len(), "Edge files");
     all_edge_files.into_par_iter().for_each(|p| {
         add_edge_file_to_uf(&p, &uf, path_size, line_size).unwrap();
         pbar.inc(1);
     });
-    println!("Built unionfind in {:?} secs", start_main.elapsed().as_secs());
 
-    // First compress all paths in the union find
+   // And then compress all paths in the union find
+   println!("Compressing paths...");
     let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
     let pbar = build_pbar(keys.len(), "Compressing UF Paths...");
     keys.into_par_iter().for_each(|k| {
         uf.find_path_compression(k);
         pbar.inc(1);        
     });
+    println!("Built unionfind in {:?} secs", start_main.elapsed().as_secs());
+
+ 
+
+    // And then get size of each cc  
+    let start_cc_size = Instant::now();
+    println!("Computing CC Sizes");
+    let cc_sizes = get_cc_sizes(&uf.nodes);    
+    println!("Made CC Sizes in {:?} secs", start_cc_size.elapsed().as_secs());
 
 
-    // And then I can consume the uf nodes as we go 
-    /*let ccs : DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>> = DashMap::new();
-    uf.nodes.into_par_iter().for_each(|(k,v)| {
-        let (parent_path, parent_line) = docid2pair(uf_parent(v.load(Ordering::Relaxed)), line_size);
-        let (child_path, child_line) = docid2pair(k, line_size);
-        let parent_enums = (IntValueEnum::new(parent_path, path_size), IntValueEnum::new(parent_line, line_size));
-        let child_enums = (IntValueEnum::new(child_path, path_size), IntValueEnum::new(child_line, line_size));
-        if parent_enums != child_enums {
-            ccs.entry(parent_enums).or_default().push(child_enums);
-        }        
-    });
-    */
-    let kill_dir = config_obj.working_dir.clone().join("kill");
+    // And then do the annotation/pruning stuff
+    let start_prune_metadata = Instant::now();
+    println!("Starting generation of pruning metadata...");
+    make_pruning_metadata(uf.nodes, cc_sizes, &config_obj.working_dir , &file_map, num_path_chunks, path_size, line_size).unwrap();
+    println!("Made pruning metadata in {:?} secs", start_prune_metadata.elapsed().as_secs());
 
-    save_kill_list2(uf.nodes, &kill_dir, &file_map, num_path_chunks).unwrap();
+
     return Ok(())
-    /*
-    // Then branch depending on whether we need annotations or kill files
-    if config_obj.annotate_only {
-        let start_anno = Instant::now();
-        println!("Building annotation files");
-        let anno_dir = config_obj.working_dir.clone().join("annotate");
-        let anno_list = collect_annotate_list(ccs);
-        save_annotate_files(anno_list, &anno_dir, &file_map, num_path_chunks).unwrap();
-        println!("Saved annotation data in {:?} secs", start_anno.elapsed().as_secs());
-    } else {
-        let start_kill = Instant::now();
-        println!("Building kill files");
-        let kill_list = collect_kill_list(ccs);
-        save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
-        println!("Saved kill files in {:?} secs", start_kill.elapsed().as_secs());
-    }
-
-    println!("Finished all unionfind stuff in {:?} seconds" , start_main.elapsed().as_secs());
-    Ok(())
-    */
 }
 
 
@@ -1019,180 +1027,71 @@ fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
 
 }
 
-fn save_kill_list2(uf_nodes: DashMap<usize, AtomicUsize>, kill_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
-     // Map path id to chunk id
-     // Just do dumb writing things... 
-    let path_id_2_chunk_id : DashMap<u64, usize> = DashMap::new();
-    for chunk_id in 0..num_path_chunks {
-        let path_chunk = file_map.get_path_chunk(chunk_id, num_path_chunks);
-        path_chunk.par_iter().for_each(|entry| {
-            let path_id = entry.1 as u64;
-            path_id_2_chunk_id.insert(path_id, chunk_id);
-        });        
-    }
-    
-
-    let writer = GenWriter::new(kill_dir, num_path_chunks, "kill");
-    let pbar = build_pbar(uf_nodes.len(), "UF NODES");
-    uf_nodes.into_par_iter().for_each(|(k,v)| {
-        let k_bytes = k.to_le_bytes();
-        //let path_id = path_id_2_chunk_id.get(&(uf_parent(k) as u64)).unwrap();
-        let mut rng = rand::thread_rng();
-        let random_u64: u64 = rng.gen();
-        let chunk_id = (random_u64 as usize) % num_path_chunks;
-        let v_bytes = v.load(Ordering::Relaxed).to_le_bytes();
-        let mut contents: Vec<u8> = Vec::new();
-        contents.extend(k_bytes);
-        contents.extend(v_bytes);
-        writer.write_line(0, contents, chunk_id).unwrap();
+fn get_cc_sizes(uf_nodes: &DashMap<usize, AtomicUsize>) -> DashMap<usize, usize> {
+    let cc_sizes: DashMap<usize, usize> = DashMap::new();
+    let pbar = build_pbar(uf_nodes.len(), "Building cc sizes");
+    uf_nodes.par_iter().for_each(|entry| {
+        let val = entry.value().load(Ordering::Relaxed);
+        let cc_id = uf_parent(val);
+        let _ = *cc_sizes.entry(cc_id).and_modify(|count| *count += 1).or_insert(1);     
         pbar.inc(1);
     });
-    writer.finish().unwrap();
-    Ok(())
+    cc_sizes
 }
 
-
-
-fn collect_kill_list(cc_map: DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>>) -> DashMap<IntValueEnum, Vec<IntValueEnum>> {
-    let pbar = build_pbar(cc_map.len(), "Organizing kill ccs");
-    let kill_list : DashMap<IntValueEnum, Vec<IntValueEnum>> = DashMap::new();
-    cc_map.into_par_iter().for_each(|(_, v)| {
-        for el in v.into_iter() {
-            kill_list.entry(el.0).or_default().push(el.1);
-        }
-        pbar.inc(1);
-    });
-    kill_list
-}
-
-
-fn save_kill_list(kill_list: DashMap<IntValueEnum, Vec<IntValueEnum>>, kill_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
-
-    // Map path id to chunk id
-    let path_id_2_chunk_id : DashMap<u64, usize> = DashMap::new();
-    for chunk_id in 0..num_path_chunks {
-        let path_chunk = file_map.get_path_chunk(chunk_id, num_path_chunks);
-        path_chunk.par_iter().for_each(|entry| {
-            let path_id = entry.1 as u64;
-            path_id_2_chunk_id.insert(path_id, chunk_id);
-        });        
-    }
-
-    // Then loop through kill list and write as we go:
-
-    let writer = GenWriter::new(kill_dir, num_path_chunks, "kill");
-    let pbar = build_pbar(kill_list.len(), "Writing kill list");
-    let terminus = u64::MAX.to_le_bytes();
-    kill_list.into_par_iter().for_each(|(k, v)| {
-        let path_id = k.as_uint::<u64>();
-
-        let chunk_id = path_id_2_chunk_id.get(&path_id).unwrap();
-        let mut contents : Vec<u8> = Vec::new();
-        contents.extend(path_id.to_le_bytes());
-        let v_contents: Vec<u8> = v.into_iter().map(|el| el.as_uint::<u64>().to_le_bytes()).flat_map(|a| a).collect();
-        contents.extend(v_contents);
-        contents.extend(terminus.clone());
-        writer.write_line(0, contents, *chunk_id).unwrap();
-        pbar.inc(1);
-    });
-    writer.finish().unwrap();
-    Ok(())
-}
-
-
-
-fn parse_kill_file(kill_file: &PathBuf) -> Result<DashMap<usize, Vec<usize>>, Error> {
-    let kill_list: DashMap<usize, Vec<usize>> = DashMap::new();
-
-    let contents = read_pathbuf_to_mem(kill_file).unwrap().into_inner().into_inner();
-    let mut path_id: usize = 0;
-    let mut restart = true;
-
-    let terminus = u64::MAX.to_le_bytes();
-
-    for chunk in contents.chunks_exact(8) {
-        if chunk == terminus {
-            restart = true;
-            continue;
-        }
-        else if restart == true {
-            path_id = u64::from_le_bytes(chunk.try_into().unwrap()) as usize;
-            restart = false;
-        } else {
-            let line_num: usize = u64::from_le_bytes(chunk.try_into().unwrap()) as usize;
-            kill_list.entry(path_id).or_default().push(line_num);
-        }
-    }
-
-    Ok(kill_list)
-}
-
-
-
-fn collect_annotate_list(cc_map: DashMap<(IntValueEnum, IntValueEnum), Vec<(IntValueEnum, IntValueEnum)>>) -> DashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum, IntValueEnum, IntValueEnum)>> {
-    // cc_map is (cc_root) -> vec![cc_els]... where each is a (path_id, doc_id) IntValueEnum pair
-    // and output is a map from path_id -> [(line_num, cc_size, cc_id, cc_idx)]
-    let annotate_list: DashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum, IntValueEnum, IntValueEnum)>> = DashMap::new();
-    let cc_id_bytes = to_byte_size(cc_map.len());
-    let max_cc_size = cc_map.iter().par_bridge().max_by_key(|e| e.value().len()).map(|e| e.value().len()).unwrap_or(1);
-    let cc_size_bytes = to_byte_size(max_cc_size);
-    let cc_id = AtomicUsize::new(0);
-
-
-    cc_map.into_par_iter().for_each(|(k, v)| {
-        let cur_cc_id = IntValueEnum::new(cc_id.fetch_add(1, Ordering::SeqCst), cc_id_bytes);
-        let cc_size = IntValueEnum::new(v.len(), cc_size_bytes);
-        let cc_idx_bytes = to_byte_size(v.len());        
-        let mut cc_idx = 0;
-        annotate_list.entry(k.0).or_default().push((k.1, cc_size.clone(), cur_cc_id.clone(), IntValueEnum::new(cc_idx, cc_idx_bytes)));
-        cc_idx += 1;
-        for el in v.into_iter() {
-            annotate_list.entry(el.0).or_default().push((el.1, cc_size.clone(), cur_cc_id.clone(), IntValueEnum::new(cc_idx, cc_idx_bytes)));
-            cc_idx += 1;
-        }
-    });
-    annotate_list
-}
-
-
-fn save_annotate_files(anno_list: DashMap<IntValueEnum, Vec<(IntValueEnum, IntValueEnum, IntValueEnum, IntValueEnum)>>, anno_dir: &PathBuf, file_map: &FileMap, num_path_chunks: usize) -> Result<(), Error> {
-    // anno list is {path_id -> <(line_num, cc_size, cc_id)>}
+fn make_pruning_metadata(uf_nodes: DashMap<usize, AtomicUsize>, cc_sizes: DashMap<usize, usize>, working_dir: &PathBuf, 
+                         file_map: &FileMap, num_path_chunks: usize, path_size: usize, line_size: usize) -> Result<(), Error> {
+    // Make output directories and writers for these 
+    let clean_dir = working_dir.clone().join("clean");    
+    let max_cc_size = cc_sizes.par_iter().map(|e| *e.value()).max().unwrap_or(1);
+    let cc_size_byte_size = to_byte_size(max_cc_size);
+    let cc_id_byte_size = to_byte_size(cc_sizes.len());
 
 
     // Map path id to chunk id
-    let path_id_2_chunk_id : DashMap<u64, usize> = DashMap::new();
+    let path_id_2_chunk_id : DashMap<usize, usize> = DashMap::new();
     for chunk_id in 0..num_path_chunks {
         let path_chunk = file_map.get_path_chunk(chunk_id, num_path_chunks);
         path_chunk.par_iter().for_each(|entry| {
-            let path_id = entry.1 as u64;
+            let path_id = entry.1 as usize;
             path_id_2_chunk_id.insert(path_id, chunk_id);
         });        
     }
 
+    let cc_idxs: DashMap<usize, usize> = DashMap::new();
+    let clean_writer = GenWriter::new(&clean_dir, num_path_chunks, "clean");
+    let metadata_header : Vec<u8> = vec![(path_size as u64).to_le_bytes(), 
+                                         (line_size as u64).to_le_bytes(), 
+                                         (cc_id_byte_size as u64).to_le_bytes(),
+                                         (cc_size_byte_size as u64).to_le_bytes(),
+                                         (cc_size_byte_size as u64).to_le_bytes()]
+                          .into_iter().flat_map(|s| s).collect();
+    (0..num_path_chunks).into_par_iter().for_each(|i|{
+            clean_writer.write_line(0, metadata_header.clone(), i).unwrap();
+    });
 
-    // Then loop through anno list and write as we go    
-    let writer = GenWriter::new(anno_dir, num_path_chunks, "annotate");
-    let pbar = build_pbar(anno_list.len(), "Writing annotation list");
-    let terminus = u64::MAX.to_le_bytes();
-    let u64_size = std::mem::size_of::<u64>();
 
-    anno_list.into_par_iter().for_each(|(path_id, quads)| {
-        let path_id = &path_id.as_uint::<u64>();
-        let chunk_id = path_id_2_chunk_id.get(path_id).unwrap();
-        let mut contents: Vec<u8> = Vec::with_capacity(2 * u64_size + 4 * u64_size * quads.len());
-        contents.extend_from_slice(&(path_id.to_le_bytes()));
-        for (line_num, cc_size, cc_id, cc_idx) in quads {
-            contents.extend_from_slice(&(&line_num.as_uint::<u64>()).to_le_bytes());
-            contents.extend_from_slice(&(&cc_size.as_uint::<u64>()).to_le_bytes());
-            contents.extend_from_slice(&(&cc_id.as_uint::<u64>()).to_le_bytes());
-            contents.extend_from_slice(&(&cc_idx.as_uint::<u64>()).to_le_bytes())            
-        }
-        contents.extend_from_slice(&terminus);
-        writer.write_line(0, contents, *chunk_id).unwrap();
+    // And then loop through nodes
+    let pbar = build_pbar(uf_nodes.len(), "Writing clean metadata");
+    uf_nodes.into_par_iter().for_each(|(child,v)| {
+        let cc_id = uf_parent(v.into_inner());
+        let cc_size = *cc_sizes.get(&cc_id).unwrap();
+        let cc_idx = *cc_idxs.entry(cc_id).and_modify(|count| *count += 1).or_insert(0);
+        let (child_path, child_line) = docid2pair(child, line_size);
+        let path_chunk = *path_id_2_chunk_id.get(&child_path).unwrap().value();
+        let child_path_bytes = IntValueEnum::new(child_path, path_size).as_bytes().to_vec();
+        let child_line_bytes = IntValueEnum::new(child_line, line_size).as_bytes().to_vec();
+        let cc_id_bytes = IntValueEnum::new(cc_id, cc_id_byte_size).as_bytes().to_vec();
+        let cc_size_bytes = IntValueEnum::new(cc_size, cc_size_byte_size).as_bytes().to_vec();
+        let cc_idx_bytes = IntValueEnum::new(cc_idx, cc_size_byte_size).as_bytes().to_vec();
+
+        // metadata file has lines of (child_path, child_line, cc_id, cc_size, cc_idx)
+        let contents = vec![child_path_bytes, child_line_bytes, cc_id_bytes, cc_size_bytes, cc_idx_bytes]
+                       .into_iter().flat_map(|s| s).collect();
+        clean_writer.write_line(0, contents, path_chunk).unwrap();        
         pbar.inc(1);
     });
-    writer.finish().unwrap();
-
+    clean_writer.finish().unwrap();
     Ok(())
 }
 
@@ -1210,9 +1109,7 @@ fn save_annotate_files(anno_list: DashMap<IntValueEnum, Vec<(IntValueEnum, IntVa
 
 */
 
-
-
-fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
+fn clean_files(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
     println!("Starting UF-based pruning...");
     let start_main = Instant::now();
     let config_obj = read_config(config).unwrap();
@@ -1221,339 +1118,154 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
     let working_dir = config_obj.working_dir; 
     let input_dir = config_obj.local_input; 
     let output_dir = config_obj.output_dir; 
+    let metadata_dir = working_dir.clone().join("clean");
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);
-    let kill_dir = working_dir.clone().join("kill");
+
+    let concat_key = config_obj.concat_key;
+
+    // Parse the metadata into a map from path_id -> [(line_num, cc_id, cc_size, cc_idx),...]
+    println!("Reading metadata file from disk...");
+    let start_clean_read = Instant::now();
+    let metadata_file = GenWriter::get_filename(&metadata_dir, path_chunk, "clean");
+    let metadata = parse_clean_metadata_file(&metadata_file).unwrap();
+    println!("Parsed metadata file in {:?} seconds", start_clean_read.elapsed().as_secs());
 
 
-    let concat_key = config_obj.concat_key; 
-
-    // Parse the kill file into a map from path_id -> [lines to kill]
-    println!("Reading kill file from disk...");
-    let start_kill_read = Instant::now();
-    let kill_file = GenWriter::get_filename(&kill_dir, path_chunk, "kill");
-    let kill_list = parse_kill_file(&kill_file).unwrap();
-    println!("Parsed kill file in {:?} seconds", start_kill_read.elapsed().as_secs());
-    
-    // Loop over the file map
-    println!("Cleaning output");
-    let start_kill_clean = Instant::now();
+    println!("Scrubbing files...");
+    let start_clean = Instant::now();
     let documents_removed = AtomicUsize::new(0);
-    let documents_seen = AtomicUsize::new(0);
-
-
+    let documents_seen = AtomicUsize::new(0);    
     let pbar = build_pbar(path_chunk_files.len(), "Files to clean");
-    path_chunk_files.par_iter().for_each(|(path, path_id)| {
-        let lines_to_kill = kill_list.entry(*path_id).or_default();
-        let (remove, seen) = clean_path(&input_dir.clone().join(path), lines_to_kill.to_vec(), &input_dir, &output_dir, &concat_key).unwrap();        
-        documents_removed.fetch_add(remove, Ordering::SeqCst);
-        documents_seen.fetch_add(seen, Ordering::SeqCst);
+    
+    path_chunk_files.into_par_iter().for_each(|(path, path_id)| {
+        
+        let line_data = metadata.remove(&path_id).unwrap_or_default().1;
+        let (lines_seen, lines_removed) = clean_path2(&path, line_data, &input_dir, &output_dir, &concat_key, &config_obj.annotate_key, config_obj.remove_duplicates).unwrap();
+        documents_removed.fetch_add(lines_removed, Ordering::Relaxed);
+        documents_seen.fetch_add(lines_seen, Ordering::Relaxed);
         pbar.inc(1);
     });
-    println!("Cleaned documents in {:?} secs", start_kill_clean.elapsed().as_secs());
+
 
     let documents_seen = documents_seen.into_inner();
     let documents_removed = documents_removed.into_inner();
-    println!("Pruned data in {:?} secs", start_main.elapsed().as_secs());
-    println!("Saw {:?} lines", documents_seen);
-    println!("Removed {:?} lines", documents_removed);
-    println!("Removal rate was {:?}", (documents_removed as f32) / (documents_seen as f32));
+    println!("Scrubbed files in {:?} secs", start_clean.elapsed().as_secs());
+    println!("Processed all files in {:?} secs", start_main.elapsed().as_secs());
+    println!("Saw {:?} files", documents_seen);
+    println!("Removed {:?} files", documents_removed);
+    println!("Removal rate would be {:?}%", 100.0 * documents_removed as f32 / (documents_seen as f32));
     Ok(())
 }
 
+fn clean_path2(input_path: &PathBuf, line_data: Vec<(usize, usize, usize, usize)>, input_dir: &PathBuf, output_dir: &PathBuf, 
+               concat_key: &Option<Vec<String>>, annotate_key: &Option<String>, do_remove: bool) -> Result<(usize, usize), Error> {
+    let output_filename = get_output_filename(input_path, input_dir, output_dir).unwrap();
+    let contents = read_pathbuf_to_mem(input_path).unwrap();
 
 
-fn clean_path(path: &PathBuf, lines_to_kill: Vec<usize>, input_directory: &PathBuf, output_directory: &PathBuf,
-              concat_key: &Option<Vec<String>>) -> Result<(usize, usize), Error> {
-    // returns (lines_removed, lines_seen)
-    let line_set: HashSet<usize> = lines_to_kill.into_iter().collect();
-    let data = read_pathbuf_to_mem(path).unwrap();
-    let mut concat_kill: HashSet<Vec<String>> = HashSet::new();
+    let anno_lookup: HashMap<usize, (usize, usize, usize)> = line_data.into_iter().map(|(a,b,c,d)| (a, (b, c, d))).collect();
 
+    let mut concat_kill: HashMap<Vec<String>, (usize, usize, usize)> = HashMap::new();
     let mut output_bytes = Vec::new();
-    let mut line_num = 0;
+    let mut lines_seen = 0;
     let mut lines_removed = 0;
 
-    for line in data.lines() {
+    fn get_anno_value(val: (usize, usize, usize)) -> Value {
+        json!({"cc_id": val.0,
+               "cc_size": val.1,
+               "cc_idx": val.2})
+    }
+
+    for (line_num, line) in contents.lines().enumerate() {
+        lines_seen += 1;
         let line = line?;
-        if line_set.contains(&line_num) {
+        // First handle the concat case where we start a new concatenation
+        if anno_lookup.contains_key(&line_num) { 
             lines_removed += 1;
-            if let Some(concat_key_real) = concat_key {
-                let line_json: Value = serde_json::from_str(&line).unwrap();
-                let concat_val = get_concat_val(&line_json, &concat_key_real).unwrap();
-                concat_kill.insert(concat_val);
+            if let Some(concat_key) = concat_key {
+                let mut line_json: Value = serde_json::from_str(&line).unwrap();
+                let concat_val = get_concat_val(&line_json, &concat_key).unwrap();
+                concat_kill.insert(concat_val, anno_lookup[&line_num]);
+                if !do_remove {
+                    set_nested_value(&mut line_json, &annotate_key.clone().unwrap(), get_anno_value(anno_lookup[&line_num])).unwrap();                    
+                    output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
+                    output_bytes.push(b'\n')
+                }
+            } else {
+                if !do_remove {
+                    let mut line_json: Value = serde_json::from_str(&line).unwrap();
+                    set_nested_value(&mut line_json, &annotate_key.clone().unwrap(), get_anno_value(anno_lookup[&line_num])).unwrap();                    
+                    output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
+                    output_bytes.push(b'\n')                    
+                }
             }
+        } else {  
+            if let Some(concat_key) = concat_key {
+                let mut line_json: Value = serde_json::from_str(&line).unwrap();
+                let concat_val = get_concat_val(&line_json, &concat_key).unwrap();
 
-        } else {
-
-            if let Some(concat_key_real) = concat_key {
-                let line_json: Value = serde_json::from_str(&line).unwrap();
-                let concat_val = get_concat_val(&line_json, &concat_key_real).unwrap();
-                if concat_kill.contains(&concat_val) {
+                if concat_kill.contains_key(&concat_val) { // if we should remove/annotate
                     lines_removed += 1;
-                } else {
+                    if !do_remove { // if we should annotate
+                        let anno_val = get_anno_value(concat_kill[&concat_val]);
+                        set_nested_value(&mut line_json, &annotate_key.clone().unwrap(), anno_val).unwrap();                    
+                        output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
+                        output_bytes.push(b'\n')                           
+                    }
+                } else { // pass through as usual
                     output_bytes.extend(line.as_bytes());
                     output_bytes.push(b'\n');                    
                 }
-            } else {
+            } else { // pass through as usual
                 output_bytes.extend(line.as_bytes());
                 output_bytes.push(b'\n');
             }            
         }
-        line_num += 1;
     }
 
     if output_bytes.len() > 0 {
-        let output_filename = get_output_filename(path, input_directory, output_directory).unwrap();
         write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
     }
-
-    Ok((lines_removed, line_num))
-}
-
-/*=================================================================
-=                      PHASE 5b: CLEAN DUPLICATES                 =
-=================================================================*/
-/* MULTINODE PARALLELISM ON PATHS
-    This annotates the jsonls with cc_size and cc_id
-    It simply requires the outputs of the previous steps (namely the FileMap in step 1, and the 
-    .kill.bin files in step 4).
-
-    It will copy over (annotated) files from the input_dir to the output_dir (as specified by the config)
-*/
-
-fn annotate(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
-    println!("Starting CC annotation...");
-    let start_main = Instant::now();
-    let config_obj = read_config(config).unwrap();
-
-
-    let working_dir = config_obj.working_dir; 
-    let input_dir = config_obj.local_input; 
-    let output_dir = config_obj.output_dir; 
-    let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
-    let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);
-    let annotate_dir = working_dir.clone().join("annotate");
-
-
-
-    // Parse the kill file into a map from path_id -> [lines to kill]
-    println!("Reading annotate file from disk...");
-    let start_annotate_read = Instant::now();
-    let annotate_file = GenWriter::get_filename(&annotate_dir, path_chunk, "annotate");
-    let annotate_list = parse_annotate_file(&annotate_file).unwrap();
-    println!("Parsed annotate file in {:?} seconds", start_annotate_read.elapsed().as_secs());
-        
-
-    println!("Annotating data");
-    let start_annotate_write = Instant::now();
-    let pbar = build_pbar(path_chunk_files.len(), "Paths");
-    let total_seen_docs = AtomicUsize::new(0);
-    path_chunk_files.par_iter().for_each(|(path, path_id)| {
-        let binding = annotate_list.entry(*path_id).or_default();
-        let this_annotate_map = binding.value();
-        let seen = annotate_path(&input_dir.clone().join(path), this_annotate_map, &input_dir, &output_dir).unwrap();
-        total_seen_docs.fetch_add(seen, Ordering::SeqCst);
-        pbar.inc(1);
-
-    });
-    println!("Annotated {:?} docs in {:?} paths in {:?} seconds", total_seen_docs.into_inner(), path_chunk_files.len(), start_annotate_write.elapsed().as_secs());
-    println!("Did full annotate flow in {:?} seconds", start_main.elapsed().as_secs());
-    Ok(())    
-}
-
-fn parse_annotate_file(annotate_file: &PathBuf) -> Result<DashMap<usize, DashMap<usize, (u64, u64, u64)>>, Error> {
-    let annotate_list: DashMap<usize, DashMap<usize,  (u64, u64, u64)>> = DashMap::new();
-    let contents = read_pathbuf_to_mem(annotate_file).unwrap().into_inner().into_inner();
-
-    let terminus = u64::MAX.to_le_bytes();
-    let usize_size = std::mem::size_of::<u64>();
-
-
-    let mut groups: Vec<Vec<u64>> = Vec::new();
-    let mut cur : Vec<u64> = Vec::new();
-    let pbar = build_pbar(contents.len() / usize_size, "annotate file chunks");
-
-    for chunk in contents.chunks_exact(usize_size) {
-        if chunk == terminus {
-            groups.push(cur);
-            cur = Vec::new();
-        } else {
-            cur.push(u64::from_le_bytes(chunk.try_into().unwrap()) as u64);
-        }
-        pbar.inc(1);
-    }
-
-    let pbar = build_pbar(groups.len(), "annotate groups");
-    for group in groups {
-        let group_map: DashMap<usize, (u64, u64, u64)> = DashMap::new();
-        let path_id = group[0] as usize;
-        for idx in 0..(group.len() / 4) {
-            let line_num = group[idx * 4 + 1] as usize;
-            let trip: (u64, u64, u64) = (group[idx * 4 + 2], group[idx * 4 + 3], group[idx * 4 + 4]);
-            group_map.insert(line_num, trip);
-        }
-        annotate_list.insert(path_id, group_map);
-        pbar.inc(1);
-    }
-
-    Ok(annotate_list)
-}
-
-
-fn annotate_path(input_filename: &PathBuf, annotate_map: &DashMap<usize, (u64, u64, u64)>, input_dir: &PathBuf, output_dir: &PathBuf) -> Result<usize, Error> {
-    let data = read_pathbuf_to_mem(input_filename).unwrap();
-    let mut output_bytes: Vec<u8> =  Vec::new();
-    let mut seen = 0;
-
-    for (line_num, line) in data.lines().enumerate() {
-        let line = line.unwrap();
-        if annotate_map.contains_key(&line_num) {
-            let mut line_json: Value = serde_json::from_str(&line).unwrap();
-            let (cc_size, cc_id, cc_idx) = *annotate_map.get(&line_num).unwrap().value();
-            let minhash_attrs = json!({"cc_size": cc_size, "cc_id": cc_id, "cc_idx": cc_idx});
-            line_json["minhash"] = minhash_attrs;
-            output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
-        } else {
-            output_bytes.extend(line.as_bytes());
-        }
-        output_bytes.push(b'\n');
-        seen += 1;
-    }
-
-    if output_bytes.len() > 0 {
-        let output_filename = get_output_filename(input_filename, input_dir, output_dir).unwrap();
-        write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
-    }
-
-    Ok(seen)
+    Ok((lines_seen, lines_removed))
 }
 
 
 
-
-/*=================================================================
-=                              Optional Analytics                 =
-=================================================================*/
-/*
-Some optional analytics calls.
-
-get_true_jacc_small: computes the actual jaccard similarity between all pairs of
-                     documents in each connected component. 
-
-    Saves outputs as a json list of lists:
-    - each list represents a connected component
-    - each element in each list is a (path_id_0, line_id_0, path_id_1, line_id_1, jaccard_sim)
-
-*/
-fn get_true_jacc_small(_config: &PathBuf) -> Result<(), Error> {
-
-    return Ok(())
+fn parse_clean_metadata_file(clean_file: &PathBuf) -> Result<DashMap<usize, Vec<(usize, usize, usize, usize)>>, Error> {
+    let contents = read_pathbuf_to_mem(clean_file).unwrap().into_inner().into_inner();
     /*
-    // Sandboxed for now
-    let start_main = Instant::now();
-    println!("Starming true jaccard similarity calculations");
-    let config_obj = read_config(config).unwrap();
+        let metadata_header : Vec<u8> = vec![(path_size as u64).to_le_bytes(), 
+                                         (line_size as u64).to_le_bytes(), 
+                                         (cc_id_byte_size as u64).to_le_bytes(),
+                                         (cc_size_byte_size as u64).to_le_bytes(),
+                                         (cc_size_byte_size as u64).to_le_bytes()]
+    */                                   
+    const HEADER_SIZE: usize = 5 * 8;
+    let path_size = u64::from_le_bytes(contents[0*8..0*8+8].try_into().unwrap()) as usize;
+    let line_size = u64::from_le_bytes(contents[1*8..1*8+8].try_into().unwrap()) as usize;
+    let cc_id_byte_size = u64::from_le_bytes(contents[2*8..2*8+8].try_into().unwrap()) as usize;
+    let cc_size_byte_size = u64::from_le_bytes(contents[3*8..3*8+8].try_into().unwrap()) as usize;
 
+    let entry_size = path_size + line_size + cc_id_byte_size + 2 * cc_size_byte_size;
+    let chunk_count = (contents.len() - HEADER_SIZE) / entry_size;
+    let pbar = build_pbar(chunk_count, "Reading metadata file");
+    let metadata : DashMap<usize, Vec<(usize, usize, usize, usize)>> = DashMap::new();
+    // path_id -> [(line_num, cc_id, cc_size, cc_idx)]
+    (0..chunk_count).into_par_iter().for_each(|idx| {
+        let start = idx * entry_size + HEADER_SIZE;
+        let chunk = &contents[start..start+entry_size];
+        let path_id = usize::from_le_bytes(chunk[0..path_size].try_into().unwrap());
+        let line_num = usize::from_le_bytes(chunk[path_size..path_size+line_size].try_into().unwrap());
+        let cc_id = usize::from_le_bytes(chunk[path_size+line_size..path_size+line_size+cc_id_byte_size].try_into().unwrap());
+        let cc_size = usize::from_le_bytes(chunk[path_size+line_size+cc_id_byte_size..path_size+line_size+cc_id_byte_size+cc_size_byte_size].try_into().unwrap());
+        let cc_idx = usize::from_le_bytes(chunk[path_size+line_size+cc_id_byte_size+cc_size_byte_size..].try_into().unwrap());
 
-    let file_map = FileMap::load(&config_obj.working_dir.join("filemap.json.gz")).unwrap();        
-    let cc_dir = config_obj.working_dir.clone().join("ccs");
-
-    // First load all ccs into memory and collect which files we have to load 
-    println!("Loading cc's");
-    let start_cc_load = Instant::now();
-    let ccs = load_all_ccs(&cc_dir).unwrap();
-    println!("Loaded ccs in {:?} secs", start_cc_load.elapsed().as_secs());
-
-
-    // Then load all data that we need 
-    println!("Starting path data load...");
-    let start_path_load = Instant::now();
-    // -- first collect the path ids we need
-    let path_ids: DashSet<usize> = DashSet::new();
-    ccs.par_iter().for_each(|entry| {
-        let value = entry.value();
-        for el in value {
-            path_ids.insert(el.0);
-        }
-    });
-    // -- and get  the path_id -> pathbuf lookup
-    let reverse_path_indices: DashMap<usize, PathBuf> = DashMap::new();
-    file_map.indices.iter().for_each(|entry| {
-        reverse_path_indices.insert(entry.1.clone(), entry.0.clone());
-    });
-    
-    // -- then load the data and get (path_id, line_num) -> ngram_set for all data
-    let pbar = build_pbar(path_ids.len(), "Path ids");
-    let tokensets: DashMap<(usize, usize), HashSet<usize>> = DashMap::new();    
-    println!("WARNING: PATH SET NOT APPLICABLE FOR CONCAT_KEY [REPO/NAME] STUFF!!!");
-    path_ids.into_par_iter().for_each(|p_id| {
-        let path = config_obj.local_input.clone().join(reverse_path_indices.get(&p_id).unwrap().clone());
-        process_path_set(&path, 
-                         p_id, 
-                         config_obj.ngram_size,
-                         config_obj.tokenizer_str.as_str(),
-                         &tokensets).unwrap();
+        metadata.entry(path_id).or_default().push((line_num, cc_id, cc_size, cc_idx));
         pbar.inc(1);
     });
 
-    // -- and group it by cc
-    let cc_ngrams : DashMap<usize, Vec<HashSet<usize>>> = DashMap::new();
-    ccs.into_par_iter().for_each(|entry| {
-        let cc_id = entry.0;
-        for doc_id in entry.1 {
-            let ngram_set = tokensets.remove(&doc_id).unwrap().1;
-            cc_ngrams.entry(cc_id).or_default().push(ngram_set);
-        }
-    });
-    println!("Loaded all path data in {:?} secs", start_path_load.elapsed().as_secs());
-
-
-    // Then get all pairwise cc distances
-    println!("Starting pairwise checks...");
-    let start_pairwise = Instant::now();
-    let pairwise_jacs = collect_pairwise_jaccards(cc_ngrams);
-    println!("Got all pairwise distances in {:?} secs", start_pairwise.elapsed().as_secs());
-
-    // Then save pairwise jaccard similarities
-    println!("Saving pairwise similarities");
-    let start_save = Instant::now();
-    println!("PAIRWISE SIMS {:?}", pairwise_jacs);
-    let pairwise_values: Vec<Vec<f32>> = pairwise_jacs.into_par_iter()
-        .map(|entry| entry.1)
-        .collect();
-    let pairwise_path = config_obj.working_dir.clone().join("jaccard_values.json.gz");
-    let pairwise_values_json = serde_json::to_vec(&pairwise_values).unwrap();
-    write_mem_to_pathbuf(&pairwise_values_json, &pairwise_path).unwrap(); 
-    println!("Saved pairwise similarities in {:?} secs", start_save.elapsed().as_secs());
-
-    println!("Collected all true jaccard similarities in {:?} secs", start_main.elapsed().as_secs());
-    Ok(())
-}
-
-
-fn collect_pairwise_jaccards(cc_ngrams: DashMap<usize, Vec<HashSet<usize>>>) -> DashMap<usize, Vec<f32>> {
-    let pairwise_jacs: DashMap<usize, Vec<f32>> = DashMap::new();
-    cc_ngrams.into_par_iter().for_each(|entry| {
-        let cc_id = entry.0;
-        for i in 0..entry.1.len() {
-            for j in (i+1)..entry.1.len() {
-                let sim = jaccard_similarity(&entry.1[i], &entry.1[j]);
-                pairwise_jacs.entry(cc_id).or_default().push(sim);
-
-            }
-        }
-    });
-
-    pairwise_jacs
-    */
-}
-
-#[allow(dead_code)]
-fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
-    let cap = x.intersection(y).count();
-    let cup = x.union(y).count();   
-    cap as f32 / cup as f32
+    Ok(metadata)
 }
 
 
@@ -1563,18 +1275,12 @@ fn jaccard_similarity(x: &HashSet<usize>, y: &HashSet<usize>)  -> f32 {
 
 fn minhash(config: &PathBuf) -> Result<(), Error> {
     // Note: this is only for SMALL runs. We set some hyperparameters for you, and this isn't optimized for these use cases
-    let config_obj = read_config(config).unwrap();
     build_file_map(&config).unwrap();
     hash_only(&config, 0, 1).unwrap();
     gather_edges(&config).unwrap();
     build_uf(&config, 1).unwrap();
-
-
-    if config_obj.annotate_only {
-        annotate(config, 0, 1).unwrap();
-    } else {
-        uf_size_prune(&config, 0, 1).unwrap();     
-    }
+    clean_files(&config, 0, 1).unwrap();     
+    
 
     Ok(())
 
@@ -1623,17 +1329,10 @@ fn main() {
             build_uf(config, *num_path_chunks)
         },
 
-        Commands::UfSizePrune {config, path_chunk, num_path_chunks} => {
-            uf_size_prune(config, *path_chunk, *num_path_chunks)
+        Commands::CleanFiles {config, path_chunk, num_path_chunks} => {
+            clean_files(config, *path_chunk, *num_path_chunks)
         },
 
-        Commands::Annotate {config, path_chunk, num_path_chunks} => {
-            annotate(config, *path_chunk, *num_path_chunks)
-        },
-
-        Commands::TrueJacc {config} => {
-            get_true_jacc_small(config)
-        },
 
         Commands::ExactDedup {config, input_dir_override, output_dir_override} => {
             cmd_exact_dedup(config, input_dir_override.clone(), output_dir_override.clone())
