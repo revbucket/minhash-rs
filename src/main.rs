@@ -1036,12 +1036,15 @@ fn save_kill_list2(uf_nodes: DashMap<usize, AtomicUsize>, kill_dir: &PathBuf, fi
     let pbar = build_pbar(uf_nodes.len(), "UF NODES");
     uf_nodes.into_par_iter().for_each(|(k,v)| {
         let k_bytes = k.to_le_bytes();
-        let path_id = path_id_2_chunk_id.get(&(uf_parent(k) as u64)).unwrap();
+        //let path_id = path_id_2_chunk_id.get(&(uf_parent(k) as u64)).unwrap();
+        let mut rng = rand::thread_rng();
+        let random_u64: u64 = rng.gen();
+        let chunk_id = (random_u64 as usize) % num_path_chunks;
         let v_bytes = v.load(Ordering::Relaxed).to_le_bytes();
         let mut contents: Vec<u8> = Vec::new();
         contents.extend(k_bytes);
         contents.extend(v_bytes);
-        writer.write_line(0, contents, *path_id);
+        writer.write_line(0, contents, chunk_id).unwrap();
         pbar.inc(1);
     });
 
