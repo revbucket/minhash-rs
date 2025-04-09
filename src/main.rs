@@ -33,7 +33,7 @@ use std::time::Instant;
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
-use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes};
+use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes, annotate_file_ed, collect_dup_profile};
 use crate::dup_aware_subsample::duplicate_aware_subsample;
 
 pub mod storage;
@@ -265,6 +265,19 @@ enum Commands {
 
         #[arg(required=true, long)]
         output_dir: PathBuf,
+    },
+
+    AnnotateEd {
+        #[arg(required=true, long)]
+        config: PathBuf
+    },
+
+    CollectDupProfile {
+        #[arg(required=true, long)]
+        cc_size_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        output: PathBuf,
     },
 
 }
@@ -1781,6 +1794,15 @@ fn main() {
         Commands::CollateCc { input_dir, input_id, output_dir} => {
             collate_cc_sizes(input_dir, *input_id, output_dir)
         }
+
+        Commands::AnnotateEd { config, } => {
+            annotate_file_ed(config)
+        }
+
+        Commands::CollectDupProfile {cc_size_dir, output} => {
+            collect_dup_profile(cc_size_dir, output)
+        }
+
 
         _ => {Ok(())}
 

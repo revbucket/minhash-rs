@@ -4,6 +4,7 @@ Can either annotate with a cc_id or remove
 */
 
 
+use anyhow::anyhow;
 use std::collections::HashMap;
 use std::io::BufRead;
 use serde_json::{Value, json};
@@ -497,8 +498,8 @@ pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathB
 	let pbar = build_pbar(cc_counter.len(), "CC -> bytes");
 	let cc_sizes: Vec<u8> = cc_counter.into_par_iter().flat_map(|(k,v)| {
 		let mut row_bytes: Vec<u8> = Vec::new();
-		row_bytes.extend(k.to_le_bytes());
-		row_bytes.extend(v.to_le_bytes());
+		row_bytes.extend(k.to_le_bytes()); // u32 -> 4 bytes
+		row_bytes.extend(v.to_le_bytes()); // u128 -> 20 bytes
 		pbar.inc(1);
 		row_bytes
 	}).collect();
@@ -508,9 +509,135 @@ pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathB
 	println!("Finished collation in {:?} secs", start_main.elapsed().as_secs());
 
 	Ok(())
-
-
-
-	
 }
 
+pub fn annotate_file_ed(config: &PathBuf) -> Result<(), Error> {
+	// loads the ccsize files, and loops over files to annotate with cc sizes
+	let config_obj = read_ed_config(config).unwrap();
+	let working_dir = config_obj.working_dir;
+	let local_input = config_obj.local_input;
+	let output_dir = config_obj.output_dir;
+	let text_field = config_obj.text_field;
+
+
+	let start_main = Instant::now();
+
+	println!("Loading CC Sizes");
+	let cc_size_exts = Some(&["ccsize.bin"][..]);
+	let cc_size_files = expand_dirs(vec![working_dir.clone().join("cc_sizes")], cc_size_exts).unwrap();
+	let cc_size_map = _load_ccsizes(&cc_size_files).unwrap();
+	println!("Loaded {:?} cc sizes in {:?} secs", cc_size_map.len(), start_main.elapsed().as_secs());
+
+	println!("Starting annotation...");
+	let paths = expand_dirs(vec![local_input.clone()], None).unwrap();
+	let pbar = build_pbar(paths.len(), "Input paths");
+	paths.into_par_iter().for_each(|p| {
+		let output_path = get_output_filename(&p, &local_input, &output_dir.clone()).unwrap();
+		let data = read_pathbuf_to_mem(&p).unwrap();
+		let mut output_bytes: Vec<u8> = Vec::new();
+		for line in data.lines() {
+			let line = line.unwrap();
+			let mut json_obj: Value = serde_json::from_str(&line).unwrap();
+			let contents = json_obj.get(text_field.clone()).unwrap().as_str().unwrap();
+			let hash = blake3::hash(contents.as_bytes());
+			let bytes = hash.as_bytes();
+			let mut result = 0u128;
+			for i in 0..16 {
+				result = (result << 8) | bytes[i] as u128;
+			}
+			let cc_size = cc_size_map.get(&result).unwrap();
+			let cc_json = json!({"size": *cc_size, "id": result});
+			json_set(&mut json_obj, &"metadata.exact_dedup".to_string(), cc_json).unwrap();
+			output_bytes.extend(serde_json::to_vec(&json_obj).unwrap());
+			output_bytes.push(b'\n');
+		}
+		write_mem_to_pathbuf(&output_bytes, &output_path).unwrap();
+		pbar.inc(1);
+	});
+
+	Ok(())
+}
+
+
+fn _load_ccsizes(cc_size_files: &Vec<PathBuf>) -> Result<DashMap<u128, u32>, Error> {
+	let cc_size_map : DashMap<u128, u32> = DashMap::new();
+	let pbar = build_pbar(cc_size_files.len(), "CC Size files");
+	const CHUNK_SIZE: usize = 20;
+	cc_size_files.par_iter().for_each(|p| {
+		let contents = read_pathbuf_to_mem(p).unwrap().into_inner().into_inner();
+		let num_chunks = contents.len() / CHUNK_SIZE;
+		(0..num_chunks).into_iter().for_each(|i| {
+			let chunk = &contents[i* CHUNK_SIZE.. i*CHUNK_SIZE + CHUNK_SIZE];
+			let cc_id = u128::from_le_bytes(chunk[4..].try_into().unwrap());
+			let cc_size = u32::from_le_bytes(chunk[..4].try_into().unwrap());
+			cc_size_map.insert(cc_id, cc_size);
+		});
+
+		pbar.inc(1);
+	});
+	Ok(cc_size_map)
+}
+
+
+
+
+pub fn json_set(input: &mut Value, key: &String, val: Value) -> Result<(), Error> {
+	let parts: Vec<&str> = key.split('.').collect();
+	let mut current = input;
+
+	for (i, &part) in parts.iter().enumerate() {
+		if i == parts.len() - 1 {
+			if current.is_object() {
+				current[part] = val;
+				return Ok(());
+			} else {
+				return Err(anyhow!("Weird nesting for setting json values"));
+			}
+		}
+		if !current.is_object() {
+			return Err(anyhow!("Weird nesting for setting json values"));
+		}
+		if !current.get(part).is_some() {
+			current[part] = json!({});
+		}
+		current = &mut current[part];
+	}
+	Ok(())
+}	
+
+
+
+pub fn collect_dup_profile(cc_size_dir: &PathBuf, output: &PathBuf) -> Result<(), Error> {
+	println!("Collecting duplicate profile.");
+	let start_main = Instant::now();
+	let cc_exts = Some(&["ccsize.bin"][..]);
+	let cc_size_files = expand_dirs(vec![cc_size_dir.clone()], cc_exts).unwrap();
+	const CHUNK_SIZE : usize = 20;
+
+	let dup_profile: DashMap<u32, u64> = DashMap::new();
+	let pbar = build_pbar(cc_size_files.len(), "CC Size files");
+	cc_size_files.into_par_iter().for_each(|p| {
+		let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
+		let num_chunks = contents.len() / CHUNK_SIZE;
+		(0..num_chunks).into_iter().for_each(|i| {
+			let chunk = &contents[i* CHUNK_SIZE.. i*CHUNK_SIZE + CHUNK_SIZE];
+			//let cc_id = u128::from_le_bytes(chunk[4..].try_into().unwrap());
+			let cc_size = u32::from_le_bytes(chunk[..4].try_into().unwrap());
+			dup_profile.entry(cc_size).and_modify(|c| *c += 1).or_insert(1);
+		});
+		pbar.inc(1);
+	});
+
+	let dup_profile_bytes: Vec<u8> = dup_profile.into_par_iter().flat_map(|(k,v)| {
+		let mut row_bytes: Vec<u8> = Vec::new();
+		let cc_size = k.to_le_bytes();
+		let cc_freq = v.to_le_bytes();
+		row_bytes.extend(cc_size);
+		row_bytes.extend(cc_freq);
+		row_bytes		
+	}).collect();
+
+	write_mem_to_pathbuf(&dup_profile_bytes, output).unwrap();
+	println!("Made duplicate profile in {:?} secs", start_main.elapsed().as_secs());
+	Ok(())
+}
