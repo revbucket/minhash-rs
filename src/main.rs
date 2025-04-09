@@ -1036,7 +1036,7 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     // } else {
     let start_kill = Instant::now();
     println!("Building kill files");
-    let kill_list = collect_kill_list(ccs);
+    let kill_list = collect_kill_list(ccs, line_size, path_size);
     let kill_dir = config_obj.working_dir.clone().join("kill");
     save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
     println!("Saved kill list in {:?} secs", start_kill.elapsed().as_secs());
@@ -1100,13 +1100,9 @@ fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
 
 
 
-fn collect_kill_list(cc_map: DashMap<usize, Vec<usize>>) -> DashMap<IntValueEnum, Vec<IntValueEnum>> {
+fn collect_kill_list(cc_map: DashMap<usize, Vec<usize>>, line_size: usize, path_size: usize) -> DashMap<IntValueEnum, Vec<IntValueEnum>> {
     let pbar = build_pbar(cc_map.len(), "Organizing kill ccs");
     let kill_list : DashMap<IntValueEnum, Vec<IntValueEnum>> = DashMap::new();
-    
-    // Define line_size and path_size
-    let line_size = 4; // Assuming default size of 4 bytes for lines
-    let path_size = 4; // Assuming default size of 4 bytes for paths
     
     cc_map.into_par_iter().for_each(|(_, v)| {
         for el in v.into_iter() {
@@ -1294,18 +1290,21 @@ fn uf_size_prune(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) ->
     let kill_file = GenWriter::get_filename(&kill_dir, path_chunk, "kill");
     let kill_list = parse_kill_file(&kill_file).unwrap();
     println!("Parsed kill file in {:?} seconds", start_kill_read.elapsed().as_secs());
-    
+
+    // Total size of kill list
+    let kill_list_size = kill_list.iter().map(|kv| kv.value().len()).sum::<usize>();
+    println!("Kill list size: {:?} bytes", kill_list_size);
+
     // Loop over the file map
     println!("Cleaning output");
     let start_kill_clean = Instant::now();
     let documents_removed = AtomicUsize::new(0);
     let documents_seen = AtomicUsize::new(0);
 
-
     let pbar = build_pbar(path_chunk_files.len(), "Files to clean");
     path_chunk_files.par_iter().for_each(|(path, path_id)| {
         let lines_to_kill = kill_list.entry(*path_id).or_default();
-        let (remove, seen) = clean_path(&input_dir.clone().join(path), lines_to_kill.to_vec(), &input_dir, &output_dir, &concat_key).unwrap();        
+        let (remove, seen) = clean_path(&input_dir.clone().join(path), lines_to_kill.to_vec(), &input_dir, &output_dir, &concat_key).unwrap();
         documents_removed.fetch_add(remove, Ordering::SeqCst);
         documents_seen.fetch_add(seen, Ordering::SeqCst);
         pbar.inc(1);
