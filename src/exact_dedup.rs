@@ -4,6 +4,7 @@ Can either annotate with a cc_id or remove
 */
 
 
+use std::fs;
 use anyhow::anyhow;
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -498,8 +499,9 @@ pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathB
 	let pbar = build_pbar(cc_counter.len(), "CC -> bytes");
 	let cc_sizes: Vec<u8> = cc_counter.into_par_iter().flat_map(|(k,v)| {
 		let mut row_bytes: Vec<u8> = Vec::new();
-		row_bytes.extend(k.to_le_bytes()); // u32 -> 4 bytes
-		row_bytes.extend(v.to_le_bytes()); // u128 -> 20 bytes
+		row_bytes.extend(k.to_le_bytes()); // u128 -> 16 bytes
+		row_bytes.extend(v.to_le_bytes()); // u32 -> 4 bytes
+		// 20 bytes total
 		pbar.inc(1);
 		row_bytes
 	}).collect();
@@ -622,18 +624,20 @@ pub fn collect_dup_profile(cc_size_dir: &PathBuf, output: &PathBuf) -> Result<()
 		(0..num_chunks).into_iter().for_each(|i| {
 			let chunk = &contents[i* CHUNK_SIZE.. i*CHUNK_SIZE + CHUNK_SIZE];
 			//let cc_id = u128::from_le_bytes(chunk[4..].try_into().unwrap());
-			let cc_size = u32::from_le_bytes(chunk[..4].try_into().unwrap());
+			let cc_size = u32::from_le_bytes(chunk[16..].try_into().unwrap());
 			dup_profile.entry(cc_size).and_modify(|c| *c += 1).or_insert(1);
 		});
 		pbar.inc(1);
 	});
 
+	let pbar = build_pbar(dup_profile.len(), "Dup profile els");
 	let dup_profile_bytes: Vec<u8> = dup_profile.into_par_iter().flat_map(|(k,v)| {
 		let mut row_bytes: Vec<u8> = Vec::new();
 		let cc_size = k.to_le_bytes();
 		let cc_freq = v.to_le_bytes();
 		row_bytes.extend(cc_size);
 		row_bytes.extend(cc_freq);
+		pbar.inc(1);
 		row_bytes		
 	}).collect();
 
@@ -641,3 +645,61 @@ pub fn collect_dup_profile(cc_size_dir: &PathBuf, output: &PathBuf) -> Result<()
 	println!("Made duplicate profile in {:?} secs", start_main.elapsed().as_secs());
 	Ok(())
 }
+
+
+pub fn make_dupaware_sampler(cc_size_dir: &PathBuf, subsample_dir: &PathBuf, subsample_rate: f32, hard_max_size: usize, soft_max_size: usize) -> Result<(), Error> {
+	println!("Making dupaware sampler...");
+	let start_main = Instant::now();
+	let cc_exts = Some(&["ccsize.bin"][..]);
+	let cc_size_files = expand_dirs(vec![cc_size_dir.clone()], cc_exts).unwrap();
+	const CHUNK_SIZE : usize = 20;
+
+
+	let total_size = cc_size_files.iter().map(|p| fs::metadata(p).unwrap().len()).sum::<u64>() as usize;
+	let total_chunks = total_size / CHUNK_SIZE;
+	let pbar = build_pbar(total_chunks, "CCs");
+
+	cc_size_files.into_par_iter().for_each(|p| {
+		let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
+		let output_file = get_output_filename(&p, cc_size_dir, subsample_dir).unwrap();
+		let num_chunks = contents.len() / CHUNK_SIZE;
+		let mut path_out: Vec<u8> = Vec::new();
+		let mut rng = rand::thread_rng();
+		(0..num_chunks).into_iter().for_each(|i| {
+			let chunk = &contents[i* CHUNK_SIZE.. i*CHUNK_SIZE + CHUNK_SIZE];
+			let cc_id = &chunk[4..];
+			let cc_size = u32::from_le_bytes(chunk[..4].try_into().unwrap()) as usize;
+
+			// Get the current subsample rate
+			let cur_sub: f32 = if cc_size > hard_max_size {
+				0.0
+			} else if cc_size > soft_max_size {
+				if rng.gen::<f32>() < subsample_rate {
+					cc_size as f32 / soft_max_size as f32
+				} else {
+					0.0
+				}
+			} else {
+				if rng.gen::<f32>() < subsample_rate {
+					1.0
+				} else {
+					0.0
+				}
+			};
+			path_out.extend(cc_id);
+			path_out.extend(cur_sub.to_le_bytes());
+			pbar.inc(1);
+
+		});
+		write_mem_to_pathbuf(&path_out, &output_file).unwrap();
+	});
+
+	println!("Made dupaware sampler in {:?} secs", start_main.elapsed().as_secs());
+	
+
+	Ok(())
+}
+
+
+
+
