@@ -482,7 +482,7 @@ pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathB
 			None
 		};
 		for chunk_id in 0..num_chunks {
-			let chunk = u128::from_le_bytes(contents[chunk_id * CHUNK_SIZE + 8..chunk_id * CHUNK_SIZE + 16].try_into().unwrap());
+			let chunk = u128::from_le_bytes(contents[chunk_id * CHUNK_SIZE + 8..chunk_id * CHUNK_SIZE + 24].try_into().unwrap());
 			cc_counter.entry(chunk).and_modify(|c| *c += 1).or_insert(1);
 
 			if let Some(ref pbar) = pbar {
