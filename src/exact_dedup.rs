@@ -458,5 +458,59 @@ pub fn get_exact_hash_signatures(config: &PathBuf, sig_prefix: &String, num_sig_
 	Ok(())
 }
 
+pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathBuf) -> Result<(), Error> {
+	// Takes a bunch of .sig.bin files and loads them into memory 
+	// And then counts occurrence of each cc_id (hash)
+	// And writes a file .ccsize.bin with contents [(cc_id: u128, cc_size: u32)]
+	let start_main = Instant::now();
+	const CHUNK_SIZE : usize = 4 + 4 + 16;
+	let cc_counter: DashMap<u128, u32> = DashMap::new();
+	let custom_ext = format!("{:08}.sig.bin", input_id);
+	let binding = [custom_ext.as_str()];
+	let extensions = Some(&binding[..]);
+	let paths = expand_dirs(vec![input_dir.clone()], extensions).unwrap();
+	println!("PTAHS {:?}", paths);
+	let last_p = paths.last().unwrap().clone();
+	println!("Processing CC Signatures");
+	let start_proc = Instant::now();
+	paths.into_par_iter().for_each(|p| {
+		let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
+		let num_chunks = contents.len() / CHUNK_SIZE;
+		let pbar = if p == last_p {
+			Some(build_pbar(num_chunks, "Path1 chunks"))
+		} else {
+			None
+		};
+		for chunk_id in 0..num_chunks {
+			let chunk = u128::from_le_bytes(contents[chunk_id * CHUNK_SIZE + 8..chunk_id * CHUNK_SIZE + 16].try_into().unwrap());
+			cc_counter.entry(chunk).and_modify(|c| *c += 1).or_insert(1);
 
+			if let Some(ref pbar) = pbar {
+				pbar.inc(1);
+			}
+		}
+	});
+	println!("Proc cc sigs in {:?} secs", start_proc.elapsed().as_secs());
+
+	// And then convert cc_sizes back to list
+	let pbar = build_pbar(cc_counter.len(), "CC -> bytes");
+
+	let cc_sizes: Vec<u8> = cc_counter.into_par_iter().flat_map(|(k,v)| {
+		let mut row_bytes: Vec<u8> = Vec::new();
+		row_bytes.extend(k.to_le_bytes());
+		row_bytes.extend(v.to_le_bytes());
+		pbar.inc(1);
+		row_bytes
+	}).collect();
+	let output_path = output_dir.clone().join(format!("cc_sizes.{:08}.ccsize.bin", input_id));
+	write_mem_to_pathbuf(&cc_sizes, &output_path).unwrap();
+
+	println!("Finished collation in {:?} secs", start_main.elapsed().as_secs());
+
+	Ok(())
+
+
+
+	
+}
 

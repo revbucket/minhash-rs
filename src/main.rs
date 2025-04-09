@@ -33,7 +33,7 @@ use std::time::Instant;
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
-use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures};
+use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes};
 use crate::dup_aware_subsample::duplicate_aware_subsample;
 
 pub mod storage;
@@ -254,7 +254,18 @@ enum Commands {
 
         #[arg(long, default_value_t=512)]
         num_sig_chunks: usize
-    }
+    },
+
+    CollateCc {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        input_id: usize,
+
+        #[arg(required=true, long)]
+        output_dir: PathBuf,
+    },
 
 }
 
@@ -1765,6 +1776,10 @@ fn main() {
 
         Commands::ExactHashSignatures {config, sig_prefix, num_sig_chunks} => {
             get_exact_hash_signatures(config, sig_prefix, *num_sig_chunks)
+        }
+
+        Commands::CollateCc { input_dir, input_id, output_dir} => {
+            collate_cc_sizes(input_dir, *input_id, output_dir)
         }
 
         _ => {Ok(())}
