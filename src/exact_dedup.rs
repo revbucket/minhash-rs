@@ -473,6 +473,7 @@ pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathB
 	let last_p = paths.last().unwrap().clone();
 	println!("Processing CC Signatures");
 	let start_proc = Instant::now();
+	let total_docs = AtomicUsize::new(0);
 	paths.into_par_iter().for_each(|p| {
 		let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
 		let num_chunks = contents.len() / CHUNK_SIZE;
@@ -484,17 +485,16 @@ pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathB
 		for chunk_id in 0..num_chunks {
 			let chunk = u128::from_le_bytes(contents[chunk_id * CHUNK_SIZE + 8..chunk_id * CHUNK_SIZE + 24].try_into().unwrap());
 			cc_counter.entry(chunk).and_modify(|c| *c += 1).or_insert(1);
-
+			total_docs.fetch_add(1, Ordering::Relaxed);
 			if let Some(ref pbar) = pbar {
 				pbar.inc(1);
 			}
 		}
 	});
 	println!("Proc cc sigs in {:?} secs", start_proc.elapsed().as_secs());
-
+	println!("Saw {:?} total docs | {:?} ccs", total_docs.into_inner(), cc_counter.len());
 	// And then convert cc_sizes back to list
 	let pbar = build_pbar(cc_counter.len(), "CC -> bytes");
-
 	let cc_sizes: Vec<u8> = cc_counter.into_par_iter().flat_map(|(k,v)| {
 		let mut row_bytes: Vec<u8> = Vec::new();
 		row_bytes.extend(k.to_le_bytes());
