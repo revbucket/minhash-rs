@@ -33,7 +33,7 @@ use std::time::Instant;
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
-use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes, annotate_file_ed, collect_dup_profile};
+use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes, annotate_file_ed, collect_dup_profile, make_dupaware_sampler};
 use crate::dup_aware_subsample::duplicate_aware_subsample;
 
 pub mod storage;
@@ -278,6 +278,23 @@ enum Commands {
 
         #[arg(required=true, long)]
         output: PathBuf,
+    },
+
+    MakeDupaware {
+        #[arg(required=true, long)]
+        cc_size_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        subsample_dir: PathBuf,        
+
+        #[arg(required=true, long)]
+        subsample_rate: f32,
+
+        #[arg(long, default_value_t=usize::MAX)]
+        hard_max_size: usize,
+
+        #[arg(long, default_value_t=usize::MAX)]
+        soft_max_size: usize,
     },
 
 }
@@ -1801,6 +1818,10 @@ fn main() {
 
         Commands::CollectDupProfile {cc_size_dir, output} => {
             collect_dup_profile(cc_size_dir, output)
+        }
+
+        Commands::MakeDupaware {cc_size_dir, subsample_dir, subsample_rate, hard_max_size, soft_max_size} => {
+            make_dupaware_sampler(cc_size_dir, subsample_dir, *subsample_rate, *hard_max_size, *soft_max_size)
         }
 
 
