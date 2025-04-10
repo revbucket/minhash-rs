@@ -690,8 +690,9 @@ pub fn make_dupaware_sampler(cc_size_dir: &PathBuf, subsample_dir: &PathBuf, sub
 		let mut rng = rand::thread_rng();
 		(0..num_chunks).into_iter().for_each(|i| {
 			let chunk = &contents[i* CHUNK_SIZE.. i*CHUNK_SIZE + CHUNK_SIZE];
-			let cc_id = &chunk[4..];
-			let cc_size = u32::from_le_bytes(chunk[..4].try_into().unwrap()) as usize;
+			let cc_id = &chunk[..16];
+			//let cc_id = &chunk[4..];
+			let cc_size = u32::from_le_bytes(chunk[16..].try_into().unwrap()) as usize;
 
 			// Get the current subsample rate
 			let cur_sub: f32 = if cc_size > hard_max_size {
