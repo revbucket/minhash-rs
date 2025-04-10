@@ -579,6 +579,11 @@ fn _load_ccsizes(cc_size_files: &Vec<PathBuf>) -> Result<DashMap<u128, u32>, Err
 	let cc_size_map : DashMap<u128, u32> = DashMap::new();
 	let pbar = build_pbar(cc_size_files.len(), "CC Size files");
 	const CHUNK_SIZE: usize = 20;
+	let total_size = cc_size_files.iter().map(|p| fs::metadata(p).unwrap().len()).sum::<u64>() as usize;
+	let total_chunks = total_size / CHUNK_SIZE;
+	let pbar = build_pbar(total_chunks, "CCs");
+
+
 	cc_size_files.par_iter().for_each(|p| {
 		let contents = read_pathbuf_to_mem(p).unwrap().into_inner().into_inner();
 		let num_chunks = contents.len() / CHUNK_SIZE;
@@ -587,9 +592,8 @@ fn _load_ccsizes(cc_size_files: &Vec<PathBuf>) -> Result<DashMap<u128, u32>, Err
 			let cc_id = u128::from_le_bytes(chunk[4..].try_into().unwrap());
 			let cc_size = u32::from_le_bytes(chunk[..4].try_into().unwrap());
 			cc_size_map.insert(cc_id, cc_size);
+			pbar.inc(1);
 		});
-
-		pbar.inc(1);
 	});
 	Ok(cc_size_map)
 }
