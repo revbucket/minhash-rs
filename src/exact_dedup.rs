@@ -679,9 +679,11 @@ pub fn make_dupaware_sampler(cc_size_dir: &PathBuf, subsample_dir: &PathBuf, sub
 	cc_size_files.into_par_iter().for_each(|p| {
 		let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
 		let output_file = get_output_filename(&p, cc_size_dir, subsample_dir).unwrap();
-		let output_file_str = output_file.to_string_lossy();
-		let base = &output_file_str[.."ccsize.bin".to_string().len()];
-		let output_file = PathBuf::from(format!("{}{}", base, "dupaware.bin"));
+		let output_file_str = output_file.to_string_lossy().replace(".ccsize.bin", ".dupaware.bin");
+		let output_file = PathBuf::from(output_file_str);
+		println!("files {:?} -> {:?}", p, output_file);
+		//let base = &output_file_str[.."ccsize.bin".to_string().len()-1];
+		//let output_file = PathBuf::from(format!("{}{}", base, "dupaware.bin"));
 
 		let num_chunks = contents.len() / CHUNK_SIZE;
 		let mut path_out: Vec<u8> = Vec::new();
