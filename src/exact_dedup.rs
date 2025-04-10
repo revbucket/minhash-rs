@@ -28,6 +28,19 @@ use crate::storage::{FileMap, GenWriter };
 const EOT_u64: u64 = u64::MAX;
 const EOT: [u8;8] = EOT_u64.to_le_bytes();
 
+
+macro_rules! time_it {
+    ($label:expr, $block:block) => {{
+        println!("Staring {}", $label);
+        let start = std::time::Instant::now();
+        let result = $block;
+        println!("Finished {} in {:?} secs", $label, start.elapsed().as_secs());
+        result
+    }};
+}
+
+
+
 /*===================================================================
 =                            CONFIG STUFF                           =
 ===================================================================*/
@@ -515,6 +528,7 @@ pub fn collate_cc_sizes(input_dir: &PathBuf, input_id: usize, output_dir: &PathB
 
 pub fn annotate_file_ed(config: &PathBuf) -> Result<(), Error> {
 	// loads the ccsize files, and loops over files to annotate with cc sizes
+	// Need to have <working_dir>/cc_sizes/ directory 
 	let config_obj = read_ed_config(config).unwrap();
 	let working_dir = config_obj.working_dir;
 	let local_input = config_obj.local_input;
@@ -690,8 +704,10 @@ pub fn make_dupaware_sampler(cc_size_dir: &PathBuf, subsample_dir: &PathBuf, sub
 					0.0
 				}
 			};
-			path_out.extend(cc_id);
-			path_out.extend(cur_sub.to_le_bytes());
+			if cur_sub > 0.0 {
+				path_out.extend(cc_id);
+				path_out.extend(cur_sub.to_le_bytes());
+			}
 			pbar.inc(1);
 
 		});
@@ -704,6 +720,76 @@ pub fn make_dupaware_sampler(cc_size_dir: &PathBuf, subsample_dir: &PathBuf, sub
 	Ok(())
 }
 
+pub fn dupaware_sample(config: &PathBuf) -> Result<(), Error> {
+	// Need dupaware.bin files in working_dir
+	println!("Starting dup-aware sampling");
+	let start_main = Instant::now();
+	let config_obj = read_ed_config(config).unwrap();
+	let working_dir = config_obj.working_dir;
+	let dupaware_dir = working_dir.clone().join("dupaware");
+	let text_field = config_obj.text_field;
+	let dupaware_exts = Some(&["dupaware.bin"][..]);
+	let dupaware_files = expand_dirs(vec![dupaware_dir], dupaware_exts).unwrap();
+	const DUPAWARE_SAMPLER_CHUNK_SIZE: usize = 16 + 4; // cc_id + sample rate
 
+	// Load dupaware sampler
+	let dupaware_sampler: DashMap<u128, f32> = DashMap::new();
+	time_it!("making dupaware sampling mechanism", {
+		let total_dupaware_size = dupaware_files.iter().map(|p| fs::metadata(p).unwrap().len()).sum::<u64>() as usize;
+		let total_chunks = total_dupaware_size / DUPAWARE_SAMPLER_CHUNK_SIZE;
+		let pbar = build_pbar(total_chunks, "Dupaware sampling builder");
+		dupaware_files.into_par_iter().for_each(|p| {
+			let contents = read_pathbuf_to_mem(&p).unwrap().into_inner().into_inner();
+			let num_chunks = contents.len() / DUPAWARE_SAMPLER_CHUNK_SIZE;
+			(0..num_chunks).into_iter().for_each(|i| {
+				let chunk = &contents[i*DUPAWARE_SAMPLER_CHUNK_SIZE..(i+1)*DUPAWARE_SAMPLER_CHUNK_SIZE];
+				let cc_id = u128::from_le_bytes(chunk[..16].try_into().unwrap());
+				let sub_rate = f32::from_le_bytes(chunk[16..].try_into().unwrap());
+				dupaware_sampler.insert(cc_id, sub_rate);
+				pbar.inc(1);
+			});
+		})
+	});
+
+
+	// Load paths:
+	let input_paths = expand_dirs(vec![config_obj.local_input.clone()], None).unwrap();
+	time_it!("dupaware sampling", {
+		let pbar = build_pbar(input_paths.len(), "Input paths");
+		input_paths.into_par_iter().for_each(|p| {
+			let mut rng = rand::thread_rng();
+			let output_file = get_output_filename(&p, &config_obj.local_input, &config_obj.output_dir).unwrap();
+			let mut output_bytes: Vec<u8> = Vec::new();
+			let data = read_pathbuf_to_mem(&p).unwrap();
+			for line in data.lines() {
+				let line = line.unwrap();
+				let json_obj: Value = serde_json::from_str(&line).unwrap();
+				let contents = json_obj.get(text_field.clone()).unwrap().as_str().unwrap();
+				let hash = blake3::hash(contents.as_bytes());
+				let bytes = hash.as_bytes();
+				let mut result = 0u128;
+				for i in 0..16 {
+					result = (result << 8) | bytes[i] as u128;
+				}
+				let survival_prob = dupaware_sampler.get(&result).map(|r| r.value().clone()).unwrap_or(0.0);
+				if survival_prob > 0.0 {
+					if survival_prob == 1.0 || rng.gen::<f32>() <= survival_prob {
+						output_bytes.extend(line.as_bytes());
+						output_bytes.push(b'\n');
+					}
+				}
+			}
+			if output_bytes.len() > 0 {
+				write_mem_to_pathbuf(&output_bytes, &output_file).unwrap();
+			}		
+			pbar.inc(1);
+		});
+	});
+
+
+
+	println!("Finished full dupaware subsampling in {:?} secs", start_main.elapsed().as_secs());
+	Ok(())
+}
 
 
