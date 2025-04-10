@@ -490,6 +490,8 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let local_input = file_map.local_input.clone();    
     let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
 
+    let this_chunk: Vec<(PathBuf, usize)> = this_chunk.into_par_iter().filter(|(path, _path_id)| local_input.join(path).exists()).collect();
+
     // -- Handle storage stuff
     let sig_storage = working_dir.clone().join("sig_storage");
     create_dir_all(&sig_storage).unwrap();
@@ -504,7 +506,6 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let start_hashing = Instant::now();
     let total_docs_hashed = AtomicUsize::new(0);    
     let hash_pbar = build_pbar(this_chunk.len(), "Paths");
-
     this_chunk.par_iter().for_each(|(path, path_id)| {
         let docs_hashed = process_path(&local_input.join(path), &band_seeds, *path_id, config_obj.band_size, config_obj.ngram_size, 
                                        config_obj.tokenizer_str.as_str(), &signature_writer, config_obj.num_sig_chunks, path_size, line_size, sig_size, &config_obj.content_key, 
