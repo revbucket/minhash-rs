@@ -576,11 +576,11 @@ pub fn annotate_file_ed(config: &PathBuf) -> Result<(), Error> {
 
 
 fn _load_ccsizes(cc_size_files: &Vec<PathBuf>) -> Result<DashMap<u128, u32>, Error> {
-	let cc_size_map : DashMap<u128, u32> = DashMap::new();
 	const CHUNK_SIZE: usize = 20;
 	let total_size = cc_size_files.iter().map(|p| fs::metadata(p).unwrap().len()).sum::<u64>() as usize;
 	let total_chunks = total_size / CHUNK_SIZE;
 	let pbar = build_pbar(total_chunks, "CCs");
+	let cc_size_map : DashMap<u128, u32> = DashMap::with_capacity(total_chunks);
 
 
 	cc_size_files.par_iter().for_each(|p| {
