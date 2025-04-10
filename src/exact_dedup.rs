@@ -562,7 +562,7 @@ pub fn annotate_file_ed(config: &PathBuf) -> Result<(), Error> {
 				result = (result << 8) | bytes[i] as u128;
 			}
 			let cc_size = cc_size_map.get(&result).unwrap();
-			let cc_json = json!({"size": *cc_size, "id": result});
+			let cc_json = json!({"size": *cc_size, "id": result.to_string()});
 			json_set(&mut json_obj, &"metadata.exact_dedup".to_string(), cc_json).unwrap();
 			output_bytes.extend(serde_json::to_vec(&json_obj).unwrap());
 			output_bytes.push(b'\n');
