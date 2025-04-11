@@ -93,6 +93,23 @@ fn read_das_config(config_path: &PathBuf) -> Result<DupAwareSubsampleConfig, Err
 
 
 
+/*===================================================================
+=                            UTILITIES                              =
+===================================================================*/
+
+
+pub fn exact_hash_u128(text: &str) -> u128 {
+	let hash = blake3::hash(text.as_bytes());
+	let bytes = hash.as_bytes();
+	let mut result = 0u128;
+	for i in 0..16 {
+		result = (result << 8) | bytes[i] as u128;
+	}	
+	result
+}
+
+
+
 
 /*===================================================================
 =                           EXACT DEDUP MINHASH                     =
