@@ -31,7 +31,7 @@ use std::time::Instant;
 
 // Internal crate imports
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
-use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
+use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size, read_le};
 use crate::uf_rush2::{UFRush, parent as uf_parent};
 use crate::exact_dedup::exact_dedup;
 use crate::dup_aware_subsample::duplicate_aware_subsample;
@@ -1254,19 +1254,12 @@ fn parse_clean_metadata_file(clean_file: &PathBuf) -> Result<DashMap<usize, Vec<
     // path_id -> [(line_num, cc_id, cc_size, cc_idx)]
     (0..chunk_count).into_par_iter().for_each(|idx| {
         let start = idx * entry_size + HEADER_SIZE;
-        let chunk = &contents[start..start+entry_size];
-        let path_id = IntValueEnum::from_bytes(chunk[0..path_size].to_vec(), path_size).as_uint::<usize>();
-        let line_num = IntValueEnum::from_bytes(chunk[path_size..path_size+line_size].to_vec(), line_size).as_uint::<usize>();
-        let cc_id = IntValueEnum::from_bytes(chunk[path_size+line_size..path_size+line_size+cc_id_byte_size].to_vec(), cc_id_byte_size).as_uint::<usize>();
-        let cc_size = IntValueEnum::from_bytes(chunk[path_size+line_size+cc_id_byte_size..path_size+line_size+cc_id_byte_size+cc_size_byte_size].to_vec(), cc_size_byte_size).as_uint::<usize>();
-        let cc_idx = IntValueEnum::from_bytes(chunk[path_size+line_size+cc_id_byte_size+cc_size_byte_size..].to_vec(), cc_size_byte_size).as_uint::<usize>();
-        //let cc_idx = usize::from_le_bytes(chunk[path_size+line_size+cc_id_byte_size+cc_size_byte_size..].try_into().unwrap());
-
-        //let path_id = usize::from_le_bytes(chunk[0..path_size].try_into().unwrap());
-        //let line_num = usize::from_le_bytes(chunk[path_size..path_size+line_size].try_into().unwrap());
-        //let cc_id = usize::from_le_bytes(chunk[path_size+line_size..path_size+line_size+cc_id_byte_size].try_into().unwrap());
-        //let cc_size = usize::from_le_bytes(chunk[path_size+line_size+cc_id_byte_size..path_size+line_size+cc_id_byte_size+cc_size_byte_size].try_into().unwrap());
-        //let cc_idx = usize::from_le_bytes(chunk[path_size+line_size+cc_id_byte_size+cc_size_byte_size..].try_into().unwrap());
+        let mut chunk = contents[start..start+entry_size].to_vec();
+        let cc_idx = read_le(chunk.drain(cc_size_byte_size..).collect());
+        let cc_size = read_le(chunk.drain(cc_size_byte_size..).collect());
+        let cc_id = read_le(chunk.drain(cc_id_byte_size..).collect());
+        let line_num = read_le(chunk.drain(line_size..).collect());
+        let path_id = read_le(chunk);
 
         metadata.entry(path_id).or_default().push((line_num, cc_id, cc_size, cc_idx));
         pbar.inc(1);

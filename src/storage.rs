@@ -72,6 +72,18 @@ pub(crate) fn compute_sig_size(num_docs: usize) -> usize {
 }
 
 
+pub fn read_le(value: Vec<u8>) -> usize {
+    let mut result: usize = 0;
+    
+    // Iterate through bytes, shifting each into position
+    for (i, &byte) in value.iter().enumerate() {
+        // In little-endian, lowest byte is first (byte 0)
+        // So we shift by i*8 bits and OR it into the result
+        result |= (byte as usize) << (i * 8);
+    }
+    
+    result
+}
 
 /*=========================================================
 =                        Nonstandard int types            =
