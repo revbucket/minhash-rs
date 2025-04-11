@@ -1254,12 +1254,13 @@ fn parse_clean_metadata_file(clean_file: &PathBuf) -> Result<DashMap<usize, Vec<
     // path_id -> [(line_num, cc_id, cc_size, cc_idx)]
     (0..chunk_count).into_par_iter().for_each(|idx| {
         let start = idx * entry_size + HEADER_SIZE;
-        let mut chunk = contents[start..start+entry_size].to_vec();
-        let cc_idx = read_le(chunk.drain(cc_size_byte_size..).collect());
-        let cc_size = read_le(chunk.drain(cc_size_byte_size..).collect());
-        let cc_id = read_le(chunk.drain(cc_id_byte_size..).collect());
-        let line_num = read_le(chunk.drain(line_size..).collect());
-        let path_id = read_le(chunk);
+        let chunk = contents[start..start+entry_size].to_vec();        
+        let path_id = read_le(chunk[..path_size].to_vec());
+        let line_num = read_le(chunk[path_size..path_size+line_size].to_vec());
+        let cc_id = read_le(chunk[path_size+line_size..path_size+line_size+cc_id_byte_size].to_vec());
+        let cc_size = read_le(chunk[path_size+line_size+cc_id_byte_size..path_size+line_size+cc_id_byte_size+cc_size_byte_size].to_vec());
+        let cc_idx = read_le(chunk[path_size+line_size+cc_id_byte_size+cc_size_byte_size..].to_vec());
+
 
         metadata.entry(path_id).or_default().push((line_num, cc_id, cc_size, cc_idx));
         pbar.inc(1);
