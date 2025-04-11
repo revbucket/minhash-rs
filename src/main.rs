@@ -1041,6 +1041,17 @@ fn get_cc_sizes(uf_nodes: &DashMap<usize, AtomicUsize>) -> DashMap<usize, usize>
 
 fn make_pruning_metadata(uf_nodes: DashMap<usize, AtomicUsize>, cc_sizes: DashMap<usize, usize>, working_dir: &PathBuf, 
                          file_map: &FileMap, num_path_chunks: usize, path_size: usize, line_size: usize) -> Result<(), Error> {
+    /*
+    Makes a bunch of pruning metadata files:
+    each file has a 40byte preamble with 5 x 8byte-le headers of [from IntValueEnum!]
+    [path_size, line_size, cc_id_size, cc_size_byte_size, cc_size_byte_size]
+    and then just a list of bytes of this^ form 
+
+    NOTE: - headers are little-endian 
+          - rows are from IntValueEnum (use this API!)
+
+    */
+
     // Make output directories and writers for these 
     let clean_dir = working_dir.clone().join("clean");    
     let max_cc_size = cc_sizes.par_iter().map(|e| *e.value()).max().unwrap_or(1);
@@ -1164,9 +1175,10 @@ fn clean_path2(input_path: &PathBuf, line_data: Vec<(usize, usize, usize, usize)
     let contents = read_pathbuf_to_mem(input_path).unwrap();
 
 
+    // Line_num -> (cc_id, cc_size, cc_idx)
     let anno_lookup: HashMap<usize, (usize, usize, usize)> = line_data.into_iter().map(|(a,b,c,d)| (a, (b, c, d))).collect();
 
-    let mut concat_kill: HashMap<Vec<String>, (usize, usize, usize)> = HashMap::new();
+    //let mut concat_kill: HashMap<Vec<String>, (usize, usize, usize)> = HashMap::new();
     let mut output_bytes = Vec::new();
     let mut lines_seen = 0;
     let mut lines_removed = 0;
@@ -1177,56 +1189,42 @@ fn clean_path2(input_path: &PathBuf, line_data: Vec<(usize, usize, usize, usize)
                "cc_idx": val.2})
     }
 
+    assert!(concat_key.is_none()); // NOT IMPLEMENTED YET 
     for (line_num, line) in contents.lines().enumerate() {
         lines_seen += 1;
         let line = line?;
-        // First handle the concat case where we start a new concatenation
-        if anno_lookup.contains_key(&line_num) { 
-            lines_removed += 1;
-            if let Some(concat_key) = concat_key {
-                let mut line_json: Value = serde_json::from_str(&line).unwrap();
-                let concat_val = get_concat_val(&line_json, &concat_key).unwrap();
-                concat_kill.insert(concat_val, anno_lookup[&line_num]);
-                if !do_remove {
-                    set_nested_value(&mut line_json, &annotate_key.clone().unwrap(), get_anno_value(anno_lookup[&line_num])).unwrap();                    
-                    output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
-                    output_bytes.push(b'\n')
-                }
-            } else {
-                if !do_remove {
-                    let mut line_json: Value = serde_json::from_str(&line).unwrap();
-                    set_nested_value(&mut line_json, &annotate_key.clone().unwrap(), get_anno_value(anno_lookup[&line_num])).unwrap();                    
-                    output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
-                    output_bytes.push(b'\n')                    
-                }
+        if anno_lookup.contains_key(&line_num) {
+            // Need to either annotate and write or just remove
+            let (cc_id, cc_size, cc_idx) = *anno_lookup.get(&line_num).unwrap();
+            // Remove if not the first idx
+            if cc_idx > 0 && do_remove {
+                continue;
             }
-        } else {  
-            if let Some(concat_key) = concat_key {
+            if cc_idx > 0 {
+                lines_removed += 1;
+            }
+            
+            if let Some(annotate_key) = annotate_key { 
+                // If we want to annotate, go ahead and do that
                 let mut line_json: Value = serde_json::from_str(&line).unwrap();
-                let concat_val = get_concat_val(&line_json, &concat_key).unwrap();
-
-                if concat_kill.contains_key(&concat_val) { // if we should remove/annotate
-                    lines_removed += 1;
-                    if !do_remove { // if we should annotate
-                        let anno_val = get_anno_value(concat_kill[&concat_val]);
-                        set_nested_value(&mut line_json, &annotate_key.clone().unwrap(), anno_val).unwrap();                    
-                        output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
-                        output_bytes.push(b'\n')                           
-                    }
-                } else { // pass through as usual
-                    output_bytes.extend(line.as_bytes());
-                    output_bytes.push(b'\n');                    
-                }
-            } else { // pass through as usual
+                let anno_value = get_anno_value((cc_id, cc_size, cc_idx));
+                set_nested_value(&mut line_json, &annotate_key.clone(), anno_value).unwrap();
+                output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
+            } else {
+                // Otherwise just write the line
                 output_bytes.extend(line.as_bytes());
                 output_bytes.push(b'\n');
-            }            
+            }
+        } else {
+            // Not found in minhash, is "unique" and gets to survive
+            output_bytes.extend(line.as_bytes());
+            output_bytes.push(b'\n');
         }
     }
-
     if output_bytes.len() > 0 {
         write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
     }
+
     Ok((lines_seen, lines_removed))
 }
 
@@ -1235,36 +1233,43 @@ fn clean_path2(input_path: &PathBuf, line_data: Vec<(usize, usize, usize, usize)
 fn parse_clean_metadata_file(clean_file: &PathBuf) -> Result<DashMap<usize, Vec<(usize, usize, usize, usize)>>, Error> {
     let contents = read_pathbuf_to_mem(clean_file).unwrap().into_inner().into_inner();
     /*
-        let metadata_header : Vec<u8> = vec![(path_size as u64).to_le_bytes(), 
-                                         (line_size as u64).to_le_bytes(), 
-                                         (cc_id_byte_size as u64).to_le_bytes(),
-                                         (cc_size_byte_size as u64).to_le_bytes(),
-                                         (cc_size_byte_size as u64).to_le_bytes()]
+    Loads the metadata_header file
+    Header of 5xu64-le 
+    And then rows are from IntValueEnums
+    Rows are of form: (path_id, line_num, cc_id, cc_size, cc_idx)
     */                                   
     const HEADER_SIZE: usize = 5 * 8;
     let path_size = u64::from_le_bytes(contents[0*8..0*8+8].try_into().unwrap()) as usize;
     let line_size = u64::from_le_bytes(contents[1*8..1*8+8].try_into().unwrap()) as usize;
     let cc_id_byte_size = u64::from_le_bytes(contents[2*8..2*8+8].try_into().unwrap()) as usize;
     let cc_size_byte_size = u64::from_le_bytes(contents[3*8..3*8+8].try_into().unwrap()) as usize;
-
-    let entry_size = path_size + line_size + cc_id_byte_size + 2 * cc_size_byte_size;
+    let entry_size = path_size + line_size + cc_id_byte_size + 2 * cc_size_byte_size;    
     let chunk_count = (contents.len() - HEADER_SIZE) / entry_size;
     let pbar = build_pbar(chunk_count, "Reading metadata file");
-    let metadata : DashMap<usize, Vec<(usize, usize, usize, usize)>> = DashMap::new();
+
+
+    let metadata : DashMap<usize, Vec<(usize, usize, usize, usize)>> = DashMap::new();    
     // path_id -> [(line_num, cc_id, cc_size, cc_idx)]
+
     (0..chunk_count).into_par_iter().for_each(|idx| {
-        let start = idx * entry_size + HEADER_SIZE;
-        let chunk = contents[start..start+entry_size].to_vec();        
-        let path_id = read_le(chunk[..path_size].to_vec());
-        let line_num = read_le(chunk[path_size..path_size+line_size].to_vec());
-        let cc_id = read_le(chunk[path_size+line_size..path_size+line_size+cc_id_byte_size].to_vec());
-        let cc_size = read_le(chunk[path_size+line_size+cc_id_byte_size..path_size+line_size+cc_id_byte_size+cc_size_byte_size].to_vec());
-        let cc_idx = read_le(chunk[path_size+line_size+cc_id_byte_size+cc_size_byte_size..].to_vec());
+        let start_idx = idx * entry_size + HEADER_SIZE;
+        let chunk = contents[start_idx..start_idx + entry_size]
+        let path_bytes = chunk[..path_size].to_vec();
+        let line_bytes = chunk[path_size..path_size + line_size].to_vec();
+        let cc_id_bytes = chunk[path_size + line_size.. path_size + line_size + cc_id_byte_size].to_vec();
+        let cc_size_bytes = chunk[path_size + line_size + cc_id_byte_size .. path_size + line_size + cc_id_byte_size + cc_size_byte_size].to_vec();
+        let cc_idx_bytes = chunk[path_size + line_size + cc_id_byte_size + cc_size_byte_size ..].to_vec();
 
-
+        let path_id = IntValueEnum::from_bytes(path_bytes, path_size).as_uint::<usize>();
+        let line_num = IntValueEnum::from_bytes(line_bytes, line_size).as_uint::<usize>();
+        let cc_id = IntValueEnum::from_bytes(cc_id_bytes, cc_id_byte_size).as_uint::<usize>();
+        let cc_size = IntValueEnum::from_bytes(cc_size_bytes, cc_size_byte_size).as_uint::<usize>();
+        let cc_idx = IntValueEnum::from_bytes(cc_idx_bytes, cc_size_byte_size).as_uint::<usize>();
+        
         metadata.entry(path_id).or_default().push((line_num, cc_id, cc_size, cc_idx));
         pbar.inc(1);
     });
+
 
     Ok(metadata)
 }
