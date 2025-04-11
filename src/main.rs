@@ -1253,7 +1253,7 @@ fn parse_clean_metadata_file(clean_file: &PathBuf) -> Result<DashMap<usize, Vec<
 
     (0..chunk_count).into_par_iter().for_each(|idx| {
         let start_idx = idx * entry_size + HEADER_SIZE;
-        let chunk = contents[start_idx..start_idx + entry_size]
+        let chunk = contents[start_idx..start_idx + entry_size].to_vec();
         let path_bytes = chunk[..path_size].to_vec();
         let line_bytes = chunk[path_size..path_size + line_size].to_vec();
         let cc_id_bytes = chunk[path_size + line_size.. path_size + line_size + cc_id_byte_size].to_vec();
