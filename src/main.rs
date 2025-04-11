@@ -1210,6 +1210,7 @@ fn clean_path2(input_path: &PathBuf, line_data: Vec<(usize, usize, usize, usize)
                 let anno_value = get_anno_value((cc_id, cc_size, cc_idx));
                 set_nested_value(&mut line_json, &annotate_key.clone(), anno_value).unwrap();
                 output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
+                output_bytes.push(b'\n');
             } else {
                 // Otherwise just write the line
                 output_bytes.extend(line.as_bytes());
