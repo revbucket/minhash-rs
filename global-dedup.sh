@@ -28,7 +28,7 @@ build_filemaps() {
     gzip -k *filemap.json
 
     for f in *filemap.json.gz; do
-        s5cmd cp -sp $f s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/global_minhash_dedup/filemaps/;
+        s5cmd cp -sp $f s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat-dedup/minhash_filemaps/;
     done
 }
 
@@ -44,7 +44,7 @@ hash_only() {
         mkdir -p /mnt/raid0/input_data/${shard}
         mkdir -p /mnt/raid0/working_dir
         
-        s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/global_minhash_dedup/filemaps/${shard}.filemap.json.gz  /mnt/raid0/working_dir/filemap.json.gz
+        s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat-dedup/minhash_filemaps/${shard}.filemap.json.gz  /mnt/raid0/working_dir/filemap.json.gz
         s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/documents/${shard}/*  /mnt/raid0/input_data/${shard}/
         
         cargo run --release -- hash-only --config examples/fineweb_global_config.yaml
@@ -62,7 +62,7 @@ hash_only() {
 gather_edges() {
     echo "$(date +"%Y-%m-%d %H:%M:%S")" "[start] merge working spaces"
     mkdir -p /mnt/raid0/working_dir/sig_storage
-    s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/global_minhash_dedup/filemaps/filemap.json.gz  /mnt/raid0/working_dir/filemap.json.gz
+    s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat-dedup/minhash_filemaps/filemap.json.gz  /mnt/raid0/working_dir/filemap.json.gz
      
     for sig_path in /mnt/raid0/working_dir_01/sig_storage/band_*/sigchunk_*; do 
         sig_band=$(basename $(dirname $sig_path))
@@ -103,7 +103,7 @@ uf_size_prune() {
        rm /mnt/raid0/working_dir/* || mkdir -p /mnt/raid0/working_dir
        ln -s /mnt/raid0/working_dir_global/* /mnt/raid0/working_dir/
        rm /mnt/raid0/working_dir/filemap.json.gz
-       s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/global_minhash_dedup/filemaps/${shard}.filemap.json.gz  /mnt/raid0/working_dir/filemap.json.gz
+       s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat-dedup/minhash_filemaps/${shard}.filemap.json.gz  /mnt/raid0/working_dir/filemap.json.gz
        s5cmd cp -sp s3://ai2-llm/pretraining-data/sources/dclm/refinedweb/dolma_reformat/documents/${shard}/*  /mnt/raid0/input_data/${shard}/
 
        cargo run --release -- uf-size-prune --config examples/fineweb_global_config.yaml
