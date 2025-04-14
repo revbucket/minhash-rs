@@ -737,17 +737,16 @@ fn gather_edges(config: &PathBuf) -> Result<(), Error> {
 
     // Load the config and initialize things
     let config_obj = read_config(config).unwrap();
-    let file_map = FileMap::load(&PathBuf::from(config_obj.working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_size = to_byte_size(config_obj.num_paths);
     let line_size = to_byte_size(config_obj.max_lines_per_path);
     let sig_size = compute_sig_size(config_obj.num_docs);
 
     // Gather the files into the proper groups (which should live in the same hash-space-universe)
     let edge_groups = gather_groups(config_obj.working_dir.clone().join("sig_storage")).unwrap(); //(sigchunk, band_id) -> [(sigfile)]
-    println!("Building singleton map...");
-    let single_band_id = edge_groups.iter().next().unwrap().key().1;
-    let singleton_map : DashMap<usize, usize> = build_singleton_map(edge_groups.iter().next().unwrap().value(), sig_size, path_size, line_size);
-    save_singletons(singleton_map, &config_obj.working_dir.clone().join("edges").join("singletons.bin")).unwrap();
+    // println!("Building singleton map...");
+    // let single_band_id = edge_groups.iter().next().unwrap().key().1;
+    // let singleton_map : DashMap<usize, usize> = build_singleton_map(edge_groups.iter().next().unwrap().value(), sig_size, path_size, line_size);
+    // save_singletons(singleton_map, &config_obj.working_dir.clone().join("edges").join("singletons.bin")).unwrap();
     // Then build the cliques for each group of (sigchunk, band_id) -- across all files!
      
     println!("Starting edge collection...");
@@ -834,7 +833,6 @@ fn build_band_group(band_sigs: &Vec<PathBuf>, sig_size: usize, path_size: usize,
     // build map from signature -> [(path_id, line_num), ...]
     // to collect docs that have the same signature within this band
     let group_map : DashMap<IntValueEnum, Vec<(usize, usize)>> = DashMap::new();
-
 
     band_sigs.iter().for_each(|path| {
         let contents = read_pathbuf_to_mem(path).unwrap().into_inner().into_inner();
@@ -963,13 +961,13 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
 
     // Load the config to initialize things
     let config_obj = read_config(config).unwrap();
-    let file_map = FileMap::load(&PathBuf::from(config_obj.working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_size = to_byte_size(config_obj.num_paths);
     let line_size = to_byte_size(config_obj.max_lines_per_path);
 
     // Build the union find and unite all the edges
     let uf = UFRush::new();
     let all_edge_files = expand_dirs(vec![config_obj.working_dir.clone().join("edges")], Some(vec![".edges.bin"].as_slice())).unwrap();
+    
     //let singletons_path = config_obj.working_dir.clone().join("edges").join("singletons.bin");
     //let singletons = load_singletons(&singletons_path).unwrap();
     //add_singletons_to_uf(singletons, &uf, line_size).unwrap();
@@ -987,7 +985,7 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     println!("Starting CC collection");
     
     let ccs: DashMap<usize, Vec<usize>> = DashMap::new();
-    let shards = uf.nodes.len() / 2500000000;
+    let shards = std::cmp::max(1, uf.nodes.len() / 2500000000);
 
     let start_cc = Instant::now();
     for shard in 0..shards {
@@ -1034,9 +1032,10 @@ fn build_uf(config: &PathBuf, num_path_chunks: usize) -> Result<(), Error> {
     //     save_annotate_files(annotate_list, &anno_dir, &file_map, num_path_chunks).unwrap();
     //     println!("Saved annotated data in {:?} secs", start_anno.elapsed().as_secs());
     // } else {
+    let file_map = FileMap::load(&PathBuf::from(config_obj.working_dir.clone()).join("filemap.json.gz")).unwrap();
     let start_kill = Instant::now();
     println!("Building kill files");
-    let kill_list = collect_kill_list(ccs, line_size, path_size);
+    let kill_list = collect_kill_list(ccs, path_size, line_size);
     let kill_dir = config_obj.working_dir.clone().join("kill");
     save_kill_list(kill_list, &kill_dir, &file_map, num_path_chunks).unwrap();
     println!("Saved kill list in {:?} secs", start_kill.elapsed().as_secs());
@@ -1068,21 +1067,6 @@ fn add_edge_file_to_uf(edge_file: &PathBuf, uf: &UFRush, path_size: usize, line_
     Ok(())
 }
 
-fn build_ccs(uf: UFRush, line_size: usize) -> Vec<((usize,usize), usize)> {
-    let size = uf.nodes.len();
-
-    let keys: Vec<usize> = uf.nodes.par_iter().map(|entry| *entry.key()).collect();
-    println!("LEN KEYS IS {:?}", keys.len());
-    println!("LINE SIZE IS {line_size}");
-    let pbar = build_pbar(size, "Docs");
-    keys.into_par_iter()
-    .map(|key| {
-        pbar.inc(1);
-        (docid2pair(key, line_size), uf.find(key))
-    })
-    .collect()
-}
-
 
 fn pair2docid(pair: (usize, usize), line_size: usize) -> usize {
     // Given a (path_id, line_id) pair, converts it into a single usize 
@@ -1100,11 +1084,10 @@ fn docid2pair(docid: usize, line_size: usize) -> (usize, usize) {
 
 
 
-fn collect_kill_list(cc_map: DashMap<usize, Vec<usize>>, line_size: usize, path_size: usize) -> DashMap<IntValueEnum, Vec<IntValueEnum>> {
-    let pbar = build_pbar(cc_map.len(), "Organizing kill ccs");
+fn collect_kill_list(ccs: DashMap<usize, Vec<usize>>, path_size: usize, line_size: usize) -> DashMap<IntValueEnum, Vec<IntValueEnum>> {
+    let pbar = build_pbar(ccs.len(), "Organizing kill ccs");
     let kill_list : DashMap<IntValueEnum, Vec<IntValueEnum>> = DashMap::new();
-    
-    cc_map.into_par_iter().for_each(|(_, v)| {
+    ccs.into_par_iter().for_each(|(_, v)| {
         for el in v.into_iter() {
             let pair = docid2pair(el, line_size);
             let path_id = IntValueEnum::new(pair.0, path_size);
