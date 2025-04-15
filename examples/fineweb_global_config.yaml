@@ -1,0 +1,17 @@
+content_key: text
+local_input: /mnt/raid0/input_data
+output_dir: /mnt/raid0/output_data
+max_lines_per_path: 262144
+name: fineweb_global
+ngram_size: 5
+band_size: 8
+num_paths: 357165
+num_bands: 14
+num_docs: 28140000000
+num_sig_chunks: 128
+remote_input: UNNEEDED FOR SINGLE NODE
+remote_output: UNNEEDED FOR SINGLE NODE
+remote_working_dir: UNNEEDED FOR SINGLE NODE
+tokenizer_str: uniseg
+working_dir: /mnt/raid0/working_dir
+annotate_only: false
