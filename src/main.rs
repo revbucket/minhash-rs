@@ -33,7 +33,8 @@ use std::time::Instant;
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
-use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes, annotate_file_ed, collect_dup_profile, make_dupaware_sampler, dupaware_sample};
+use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes, annotate_file_ed, collect_dup_profile, make_dupaware_sampler, dupaware_sample, local_exact_profile};
+
 //use crate::dup_aware_subsample::duplicate_aware_subsample;
 
 pub mod storage;
@@ -296,6 +297,15 @@ enum Commands {
         #[arg(long, default_value_t=usize::MAX)]
         soft_max_size: usize,
     },
+
+
+    LocalExactProfile {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        output_dir: PathBuf,
+    }
 
 }
 
@@ -1823,6 +1833,10 @@ fn main() {
 
         Commands::MakeDupaware {cc_size_dir, subsample_dir, subsample_rate, hard_max_size, soft_max_size} => {
             make_dupaware_sampler(cc_size_dir, subsample_dir, *subsample_rate, *hard_max_size, *soft_max_size)
+        }
+
+        Commands::LocalExactProfile {input_dir, output_dir} => {
+            local_exact_profile(input_dir, output_dir)
         }
 
 

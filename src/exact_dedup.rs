@@ -816,3 +816,44 @@ pub fn dupaware_sample(config: &PathBuf) -> Result<(), Error> {
 }
 
 
+
+pub fn local_exact_profile(input_dir: &PathBuf, output_dir: &PathBuf) -> Result<(), Error> {
+	// Collects the frequency of frequencies from a collection of docs that can fit in a single node
+	let start_main = Instant::now();
+	let paths = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+	let hash_counts : DashMap<u128, usize> = DashMap::new();
+	time_it!("Hashing documents", {
+		let pbar = build_pbar(paths.len(), "Paths");
+		paths.into_par_iter().for_each(|p| {
+			let contents = read_pathbuf_to_mem(&p).unwrap();
+			for line in contents.lines() {
+				let line = line.unwrap();
+				let json_line: Value = serde_json::from_str(&line).unwrap();
+				let text = json_line.get("text").unwrap().as_str().unwrap().to_string();
+				let hash_val = exact_hash_u128(&text);
+				hash_counts.entry(hash_val).and_modify(|c| *c += 1).or_insert(1);
+			}
+			pbar.inc(1);
+		});
+	});
+
+
+	let frequency_counts: DashMap<usize, usize> = DashMap::new();
+	let pbar = build_pbar(hash_counts.len(), "Hash vals");
+	time_it!("Counting frequencies", {
+		hash_counts.into_par_iter().for_each(|(_, v)| {
+			frequency_counts.entry(v).and_modify(|c| *c += 1).or_insert(1);
+			pbar.inc(1);
+		})
+	});
+
+	let profile: HashMap<usize, usize> = frequency_counts.into_par_iter().map(|(k,v)| (k,v)).collect();
+	let output_file = output_dir.clone().join("exact_dup_profile.json.gz");
+	let profile_json = serde_json::to_vec(&profile).unwrap();
+	write_mem_to_pathbuf(&profile_json, &output_file).unwrap();
+
+	println!("Done making profile in {:?} seconds", start_main.elapsed().as_secs());
+	Ok(())
+}
+
