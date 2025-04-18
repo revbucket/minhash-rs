@@ -34,7 +34,7 @@ use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, 
 use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::UFRush;
 use crate::exact_dedup::{exact_dedup, get_exact_hash_signatures, collate_cc_sizes, annotate_file_ed, collect_dup_profile, make_dupaware_sampler, dupaware_sample, local_exact_profile};
-
+use crate::dup_aware_subsample::dupaware_subsample_annotated;
 //use crate::dup_aware_subsample::duplicate_aware_subsample;
 
 pub mod storage;
@@ -305,6 +305,11 @@ enum Commands {
 
         #[arg(required=true, long)]
         output_dir: PathBuf,
+    },
+
+    DupawareSubAnno {
+        #[arg(required=true, long)]
+        config: PathBuf,        
     }
 
 }
@@ -1839,7 +1844,9 @@ fn main() {
             local_exact_profile(input_dir, output_dir)
         }
 
-
+        Commands::DupawareSubAnno {config} => {
+            dupaware_subsample_annotated(config)
+        }
 
 
         _ => {Ok(())}
