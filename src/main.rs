@@ -1,4 +1,5 @@
 // External crates
+use crate::dup_aware_subsample::custom_anno_profile;
 use ahash::RandomState;
 use anyhow::{Error, Result};
 use clap::{Parser, Subcommand};
@@ -313,7 +314,19 @@ enum Commands {
 
         #[arg(long, default_value_t=false)]
         also_minhash: bool
-    }
+    },
+
+    CustomAnnoProfile {
+        #[arg(required=true, long)]
+        input_dir: PathBuf,
+
+        #[arg(required=true, long)]
+        output_dir: PathBuf,        
+
+        #[arg(required=true, long)]        
+        cc_id: String,
+    },
+
 
 }
 
@@ -1851,6 +1864,9 @@ fn main() {
             dupaware_subsample_annotated(config, *also_minhash)
         }
 
+        Commands::CustomAnnoProfile {input_dir, output_dir, cc_id} => {
+            custom_anno_profile(input_dir, output_dir, cc_id)
+        }
 
         _ => {Ok(())}
 

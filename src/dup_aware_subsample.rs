@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use mj_io::expand_dirs;
 use rand::random;
 use std::io::BufRead;
 use serde_json::Value;
@@ -295,5 +297,46 @@ fn duplicate_aware_subsample_file(path: &PathBuf, output_path: &PathBuf, survivi
 	}
 
 	Ok((surviving_docs, total_docs))
+}
+
+
+pub fn custom_anno_profile(input_dir: &PathBuf, output_dir: &PathBuf, cc_id: &String) -> Result<(), Error> {
+	let start_main = Instant::now();
+	println!("Starting custom profiling");
+
+	let start_phase1 = Instant::now();
+	let input_paths = expand_dirs(vec![input_dir.clone()], None).unwrap();
+
+	let cc_id_counts: DashMap<String, usize> = DashMap::new();
+	let pbar = build_pbar(input_paths.len(), "Input paths");
+	input_paths.par_iter().for_each(|p| {
+		let contents = read_pathbuf_to_mem(p).unwrap();
+		for line in contents.lines() {
+			let line = line.unwrap();
+			let serde_line: Value = serde_json::from_str(&line).unwrap();
+			let cc_val = json_get(&serde_line, cc_id).unwrap().as_str().unwrap().to_string();
+			cc_id_counts.entry(cc_val).and_modify(|v| *v += 1).or_insert(1);
+		}
+		pbar.inc(1);
+	});
+	println!("Finished phase 1 in {:?} secs", start_phase1.elapsed().as_secs());
+
+
+	let start_phase2 = Instant::now();
+	let val_count: DashMap<usize, usize> = DashMap::new();
+	let pbar = build_pbar(cc_id_counts.len(), "CC ID elements");
+	cc_id_counts.into_par_iter().for_each(|(_,v)| {
+		val_count.entry(v).and_modify(|x| *x += 1).or_insert(1);
+		pbar.inc(1);
+	});
+	println!("Finished phase 2 in {:?} secs", start_phase2.elapsed().as_secs());
+	let profile: HashMap<usize, usize> = val_count.into_iter().map(|(k,v)| (k,v)).collect();
+	let json_bytes = serde_json::to_vec(&profile).unwrap();
+	let path_stem = input_dir.file_stem().unwrap().to_str().unwrap();
+	let output_file = output_dir.clone().join(format!("{:}_profile.json", path_stem));
+	write_mem_to_pathbuf(&json_bytes, &output_file).unwrap();
+
+	println!("Finished profile {:?} in {:?} secs", output_file, start_main.elapsed().as_secs());
+	Ok(())
 }
 
