@@ -84,7 +84,7 @@ pub fn json_get<'a>(data: &'a serde_json::Value, key: &str) -> Option<&'a Value>
 ===========================================================================*/
 
 
-pub fn dupaware_subsample_annotated(config: &PathBuf) -> Result<(), Error> {
+pub fn dupaware_subsample_annotated(config: &PathBuf, also_minhash: bool) -> Result<(), Error> {
 	// Does duplicate aware subsampling on a dataset that can fit within a single node's storage
 	// Assumes that there's already a key that has the "CC id" already annotated onto every node
 	// So the flow is to 1. Get a dashmap counting each CC_id, and then subsampling, 
@@ -158,8 +158,11 @@ pub fn dupaware_subsample_annotated(config: &PathBuf) -> Result<(), Error> {
     			} else {
     				*entry -= 1;
     			}
-    			output_bytes.extend(line.as_bytes());
-    			output_bytes.push(b'\n');
+
+    			if !also_minhash || (json_get(&serde_line, "minhash.cc_idx").unwrap().as_u64().unwrap() == 1) {
+	    			output_bytes.extend(line.as_bytes());
+	    			output_bytes.push(b'\n');
+	    		}
     		}
     	}
     	if output_bytes.len() > 0 {

@@ -310,6 +310,9 @@ enum Commands {
     DupawareSubAnno {
         #[arg(required=true, long)]
         config: PathBuf,        
+
+        #[arg(long, default_value_t=false)]
+        also_minhash: bool
     }
 
 }
@@ -1844,8 +1847,8 @@ fn main() {
             local_exact_profile(input_dir, output_dir)
         }
 
-        Commands::DupawareSubAnno {config} => {
-            dupaware_subsample_annotated(config)
+        Commands::DupawareSubAnno {config, also_minhash} => {
+            dupaware_subsample_annotated(config, *also_minhash)
         }
 
 
