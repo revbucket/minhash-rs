@@ -161,10 +161,16 @@ pub fn dupaware_subsample_annotated(config: &PathBuf, also_minhash: bool) -> Res
     				*entry -= 1;
     			}
 
-    			if !also_minhash || (json_get(&serde_line, "minhash.cc_idx").unwrap().as_u64().unwrap() == 0) {
+    			if also_minhash {
+    				if json_get(&serde_line, "minhash.cc_idx").unwrap().as_u64().unwrap() == 0 {
+		    			output_bytes.extend(line.as_bytes());
+		    			output_bytes.push(b'\n');    	    					
+    				}
+    			} else {
 	    			output_bytes.extend(line.as_bytes());
-	    			output_bytes.push(b'\n');
-	    		}
+	    			output_bytes.push(b'\n');    				
+    			}
+
     		}
     	}
     	if output_bytes.len() > 0 {
