@@ -161,7 +161,7 @@ pub fn dupaware_subsample_annotated(config: &PathBuf, also_minhash: bool) -> Res
     				*entry -= 1;
     			}
 
-    			if !also_minhash || (json_get(&serde_line, "minhash.cc_idx").unwrap().as_u64().unwrap() == 1) {
+    			if !also_minhash || (json_get(&serde_line, "minhash.cc_idx").unwrap().as_u64().unwrap() == 0) {
 	    			output_bytes.extend(line.as_bytes());
 	    			output_bytes.push(b'\n');
 	    		}
@@ -314,7 +314,7 @@ pub fn custom_anno_profile(input_dir: &PathBuf, output_dir: &PathBuf, cc_id: &St
 		for line in contents.lines() {
 			let line = line.unwrap();
 			let serde_line: Value = serde_json::from_str(&line).unwrap();
-			let cc_val = json_get(&serde_line, cc_id).unwrap().as_str().unwrap().to_string();
+			let cc_val = json_get(&serde_line, cc_id).unwrap().to_string();
 			cc_id_counts.entry(cc_val).and_modify(|v| *v += 1).or_insert(1);
 		}
 		pbar.inc(1);
