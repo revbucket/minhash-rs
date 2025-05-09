@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use serde_yaml;
 use sha2::{Digest, Sha256};
-use tiktoken_rs::{CoreBPE, p50k_base};
+use tiktoken_rs::{CoreBPE, p50k_base, cl100k_base};
 use unicode_segmentation::UnicodeSegmentation;
 
 // Standard library
@@ -331,12 +331,23 @@ struct OmniTokenizer {
 
 impl OmniTokenizer {
     fn new(tokenizer_name: &str) -> Result<Self, Error> {
-        Ok(OmniTokenizer { tokenizer_name: tokenizer_name.to_string(), inner: p50k_base().unwrap()})
+        let inner_tokenizer = match tokenizer_name.to_string().as_str() {
+            "p50k" => p50k_base().unwrap(),
+            "cl100k" => cl100k_base().unwrap(),
+            _ => {
+                println!("Tokenizer {:?} <--- BE CAREFUL HERE", tokenizer_name.to_string());
+                p50k_base().unwrap()
+            }
+        };
+        Ok(OmniTokenizer { tokenizer_name: tokenizer_name.to_string(), inner: inner_tokenizer})
     }
 
     fn encode(&self, text: &str) -> Vec<usize> {
         match self.tokenizer_name.as_str() {
             "p50k" => {
+                self.inner.encode_with_special_tokens(text)
+            },
+            "cl100k" => {
                 self.inner.encode_with_special_tokens(text)
             }
             "uniseg" => {
