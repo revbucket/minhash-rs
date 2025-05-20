@@ -1,0 +1,17 @@
+name: all_dressed_v2_10x
+num_bands: 26
+band_size: 11
+ngram_size: 5
+tokenizer_str: p50k
+num_sig_chunks: 2048
+num_docs: 7000000000
+max_lines_per_path: 1000000
+content_key: text
+local_input: /mnt/raid0/input
+working_dir: /mnt/raid0/working
+output_dir: /mnt/raid0/output
+remote_input: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v2/english_madlad25/
+remote_working_dir: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v2/minhash_10shard/working/
+remote_output: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v2/minhash_10shard/working/output
+annotate_only: True
+

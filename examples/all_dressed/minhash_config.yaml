@@ -1,0 +1,15 @@
+name: all_dressed_english_minhash
+num_bands: 14
+band_size: 8
+ngram_size: 5
+tokenizer_str: p50k
+num_sig_chunks: 1024
+num_docs: 25000000000 # 22.7B -> so 25B to be safe
+max_lines_per_path: 1000000
+content_key: text
+local_input: /mnt/raid0/input
+working_dir: /mnt/raid0/working
+output_dir: /mnt/raid0/output
+remote_input: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed/english/
+remote_working_dir: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed/english_minhash/working/
+remote_output: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed/english_minhash/data/
