@@ -115,7 +115,7 @@ pub fn dupaware_subsample_annotated(config: &PathBuf, also_minhash: bool) -> Res
     	for line in contents.lines() {
     		let line = line.unwrap();
     		let serde_line = serde_json::from_str(&line).unwrap();
-    		let cc_id = json_get(&serde_line, &config_obj.cc_field).unwrap().as_str().unwrap().to_string();
+    		let cc_id = json_get(&serde_line, &config_obj.cc_field).unwrap().to_string();
     		cc_counts.entry(cc_id).and_modify(|c| *c += 1).or_insert(1);
     	}
     	pbar.inc(1);
@@ -151,7 +151,7 @@ pub fn dupaware_subsample_annotated(config: &PathBuf, also_minhash: bool) -> Res
     	for line in contents.lines() {
     		let line = line.unwrap();
     		let serde_line = serde_json::from_str(&line).unwrap();
-    		let cc_id = json_get(&serde_line, &config_obj.cc_field).unwrap().as_str().unwrap().to_string();
+    		let cc_id = json_get(&serde_line, &config_obj.cc_field).unwrap().to_string();
     		if let Some(mut entry) = surviving_ccs.get_mut(&cc_id) {
     			let current_val = *entry;
     			if current_val <= 1 {
