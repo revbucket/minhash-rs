@@ -14,4 +14,4 @@ remote_input: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v
 remote_working_dir: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v2/minhash_10shard/working/
 remote_output: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v2/minhash_10shard/working/output
 annotate_only: True
-
+annotate_key: metadata.minhash
