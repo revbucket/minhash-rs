@@ -1055,8 +1055,9 @@ fn make_pruning_metadata(uf_nodes: DashMap<usize, AtomicUsize>, cc_sizes: DashMa
     // Make output directories and writers for these 
     let clean_dir = working_dir.clone().join("clean");    
     let max_cc_size = cc_sizes.par_iter().map(|e| *e.value()).max().unwrap_or(1);
+    let max_cc_id = cc_sizes.par_iter().map(|e| *e.key()).max().unwrap_or(1);
     let cc_size_byte_size = to_byte_size(max_cc_size);
-    let cc_id_byte_size = to_byte_size(cc_sizes.len());
+    let cc_id_byte_size = to_byte_size(max_cc_id);
 
 
     // Map path id to chunk id
