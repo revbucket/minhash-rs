@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use serde_yaml;
 use sha2::{Digest, Sha256};
-use tiktoken_rs::{CoreBPE, p50k_base};
+use tiktoken_rs::{CoreBPE, p50k_base, cl100k_base};
 use unicode_segmentation::UnicodeSegmentation;
 
 // Standard library
@@ -31,7 +31,7 @@ use std::time::Instant;
 
 // Internal crate imports
 use mj_io::{expand_dirs, read_pathbuf_to_mem, write_mem_to_pathbuf, build_pbar, get_output_filename};
-use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size, read_le};
+use crate::storage::{compute_sig_size, FileMap, GenWriter, IntValueEnum, SignatureWriter, to_byte_size};
 use crate::uf_rush2::{UFRush, parent as uf_parent};
 use crate::exact_dedup::exact_dedup;
 use crate::dup_aware_subsample::duplicate_aware_subsample;
@@ -358,14 +358,22 @@ struct OmniTokenizer {
 
 impl OmniTokenizer {
     fn new(tokenizer_name: &str) -> Result<Self, Error> {
-        Ok(OmniTokenizer { tokenizer_name: tokenizer_name.to_string(), inner: p50k_base().unwrap()})
+        if tokenizer_name == "cl100k" {
+            Ok(OmniTokenizer { tokenizer_name: tokenizer_name.to_string(), inner: cl100k_base().unwrap()})
+        } else {
+            Ok(OmniTokenizer { tokenizer_name: tokenizer_name.to_string(), inner: p50k_base().unwrap()})            
+        }
+
     }
 
     fn encode(&self, text: &str) -> Vec<usize> {
         match self.tokenizer_name.as_str() {
             "p50k" => {
                 self.inner.encode_with_special_tokens(text)
-            }
+            }, 
+            "cl100k" => {
+                self.inner.encode_with_special_tokens(text)
+            },             
             "uniseg" => {
                 text.split_word_bounds().map(|w| {
                     let mut hasher = DefaultHasher::new();
