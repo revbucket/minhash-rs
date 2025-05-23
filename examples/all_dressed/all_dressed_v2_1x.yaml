@@ -8,7 +8,7 @@ num_docs: 40000000000
 max_lines_per_path: 1000000
 content_key: text
 local_input: /mnt/raid0/input
-working_dir: scratch/
+working_dir: /mnt/raid0/working
 output_dir: /mnt/raid0/output
 remote_input: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v2/english_madlad25/
 remote_working_dir: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v2/minhash_1shard/working/
