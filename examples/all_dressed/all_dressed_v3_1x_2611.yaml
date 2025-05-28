@@ -11,8 +11,8 @@ local_input: /mnt/raid0/input/
 working_dir: /mnt/raid0/working/
 output_dir: /mnt/raid0/output
 remote_input: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/exact_dedup/
-remote_working_dir: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/minhash/working
-remote_output: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/minhash/data
+remote_working_dir: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/minhash/param_26_11/working
+remote_output: s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/minhash/param_26_11/data
 annotate_only: true
 annotate_key: metadata.minhash
 delete_while_cleaning: true
