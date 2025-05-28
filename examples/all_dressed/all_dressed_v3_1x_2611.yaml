@@ -1,6 +1,6 @@
-name: alldressedv3_1xminhash_14:8
-num_bands: 14
-band_size: 8
+name: alldressedv3_1xminhash_26:11
+num_bands: 26
+band_size: 11
 ngram_size: 5
 tokenizer_str: p50k
 num_sig_chunks: 16
