@@ -1167,7 +1167,7 @@ fn clean_files(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> R
         let line_data = metadata.remove(&path_id).unwrap_or_default().1;
         let (lines_seen, lines_removed) = clean_path2(&input_dir.clone().join(&path), line_data, &input_dir, &output_dir, &concat_key, &config_obj.annotate_key, config_obj.remove_duplicates).unwrap();
         if config_obj.delete_while_cleaning {
-            fs::remove_file(&path).unwrap();
+            fs::remove_file(&input_dir.clone().join(path)).unwrap();
         }
         documents_removed.fetch_add(lines_removed, Ordering::Relaxed);
         documents_seen.fetch_add(lines_seen, Ordering::Relaxed);
