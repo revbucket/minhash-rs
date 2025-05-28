@@ -1,4 +1,5 @@
 // External crates
+use std::fs;
 use ahash::RandomState;
 use anyhow::{Error, Result};
 use clap::{Parser, Subcommand};
@@ -271,7 +272,9 @@ struct Config {
     #[serde(default)]
     annotate_key: Option<String>,
     #[serde(default)]
-    remove_duplicates: bool
+    remove_duplicates: bool,
+    #[serde(default)]
+    delete_while_cleaning: bool 
 
 
 }
@@ -527,6 +530,7 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
         let line = line.unwrap();
         let json_obj: Value = serde_json::from_str(&line).expect(&format!("Failed to parse {:?} {:?}", path.clone(), line_num));
         let line_text = json_obj.get(content_key).unwrap().as_str().unwrap().to_string();
+
         if let Some(ref concat_key_real) = concat_key {
             let concat_val = get_concat_val(&json_obj, &concat_key_real).unwrap();
             if concat_val != last_concat_val {
@@ -538,12 +542,11 @@ fn process_path(path: &PathBuf, band_seeds: &Vec<u32>, path_id: usize, band_size
         }
         line_groups.entry(cur_line).or_default().push(line_text.to_string());
     }
-
     let mut groups_hashed = 0;
     for (k,v) in line_groups.into_iter() {
         let line_num = IntValueEnum::new(k, line_size);
         let text = v.join("\n");
-        let hash_vals = if exact_override {
+        let hash_vals = if !exact_override {
             let Ok(tokens) = catch_unwind(|| preprocess_text(&text, &tokenizer)) else {
                 println!("Tokenization failed on {:?} | {:?} | {:?}", path.clone(), path_id, line_num.as_uint::<usize>());
                 continue;
@@ -583,7 +586,8 @@ fn hash_object<T: Hash>(obj: &T) -> usize {
 fn preprocess_text(text: &str, tokenizer: &OmniTokenizer) -> Vec<usize> 
 {
     let text = clean_text(text);
-    tokenizer.encode(&text)
+    let tokens = tokenizer.encode(&text);
+    tokens
 }
 
 
@@ -1161,7 +1165,10 @@ fn clean_files(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> R
     path_chunk_files.into_par_iter().for_each(|(path, path_id)| {
         
         let line_data = metadata.remove(&path_id).unwrap_or_default().1;
-        let (lines_seen, lines_removed) = clean_path2(&input_dir.clone().join(path), line_data, &input_dir, &output_dir, &concat_key, &config_obj.annotate_key, config_obj.remove_duplicates).unwrap();
+        let (lines_seen, lines_removed) = clean_path2(&input_dir.clone().join(&path), line_data, &input_dir, &output_dir, &concat_key, &config_obj.annotate_key, config_obj.remove_duplicates).unwrap();
+        if config_obj.delete_while_cleaning {
+            fs::remove_file(&path).unwrap();
+        }
         documents_removed.fetch_add(lines_removed, Ordering::Relaxed);
         documents_seen.fetch_add(lines_seen, Ordering::Relaxed);
         pbar.inc(1);
