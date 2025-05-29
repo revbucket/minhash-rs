@@ -1,0 +1,15 @@
+sudo yum install pip  -y
+pip install boto3 click smart_open
+
+cd ~/minhash-rs
+git checkout lowermem_cc2
+git pull
+python3 python/s5cmd_part_generator.py --config examples/all_dressed/all_dressed_v3_1x_2611.yaml --chunk-id $1 --num-chunks 16 
+
+s5cmd run /mnt/raid0/working/s5cmd* 
+s5cmd cp s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/minhash/param_26_11/working/filemap.json.gz /mnt/raid0/working/
+cargo run --release --hash-only --config examples/all_dressed/all_dressed_v3_1x_2611.yaml --path-chunk $1 --num-path-chunks 16 > "/mnt/raid0/hash_chunk_${i}.log"
+
+s5cmd cp -sp /mnt/raid0/*.log s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/minhash/param_26_11/logs/ 
+s5cmd cp -sp /mnt/raid0/working/ s3://ai2-llm/pretraining-data/sources/cc_all_dressed/all_dressed_v3/minhash/param_26_11/working
+

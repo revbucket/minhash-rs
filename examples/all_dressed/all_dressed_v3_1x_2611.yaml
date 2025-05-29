@@ -3,7 +3,7 @@ num_bands: 26
 band_size: 11
 ngram_size: 5
 tokenizer_str: p50k
-num_sig_chunks: 16
+num_sig_chunks: 4096
 num_docs: 15000000000 # 12.3B -> so 15B to be safe
 max_lines_per_path: 100000
 content_key: text
