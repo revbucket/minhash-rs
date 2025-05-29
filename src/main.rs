@@ -475,6 +475,9 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let local_input = file_map.local_input.clone();    
     let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);    
+    let this_chunk: Vec<(PathBuf, usize)> = this_chunk.into_par_iter().filter(|(path, _path_id)| {
+        local_input.join(path).exists()
+    }).collect();
 
     // -- Handle storage stuff
     let sig_storage = working_dir.clone().join("sig_storage");
