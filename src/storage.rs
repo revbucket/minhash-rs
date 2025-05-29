@@ -558,13 +558,13 @@ pub struct SignatureWriter {
 }
 
 impl SignatureWriter {
-	pub fn new(storage_loc: &PathBuf, band_ids: Vec<u32>, num_sig_chunks: usize, path_chunk: usize) -> Self {
+	pub fn new(storage_loc: &PathBuf, band_ids: Vec<u32>, num_sig_chunks: usize, path_chunk: usize, id_subext: &Option<String>) -> Self {
 		let writer : DashMap<(u32, usize), Arc<Mutex<BufWriter<File>>>> = DashMap::new();
 		// Create writers into |band_ids|
 		println!("Opening {:?} signature files", band_ids.len() * num_sig_chunks);
 		for band_id in &band_ids {
 			for sig_chunk in 0..num_sig_chunks {
-				let filename = SignatureWriter::get_filename(storage_loc, *band_id, sig_chunk, path_chunk);
+				let filename = SignatureWriter::get_filename(storage_loc, *band_id, sig_chunk, path_chunk, id_subext.clone());
 				if let Some(parent_dir) = filename.parent() {
 			        if !parent_dir.exists() {
 			            create_dir_all(parent_dir).unwrap()
@@ -583,27 +583,22 @@ impl SignatureWriter {
 				writer.insert((*band_id, sig_chunk), sigwriter);			
 			}
 		}
-		SignatureWriter { writer, storage_loc: storage_loc.clone(), band_ids: band_ids.clone(), num_sig_chunks }
+		SignatureWriter { writer, storage_loc: storage_loc.clone(), band_ids: band_ids.clone(), num_sig_chunks}
 	}
 
-	pub fn get_filename(storage_loc: &PathBuf, band_id: u32, sig_chunk: usize, path_chunk: usize) -> PathBuf {
+	pub fn get_filename(storage_loc: &PathBuf, band_id: u32, sig_chunk: usize, path_chunk: usize, id_subext: Option<String>) -> PathBuf {
+		let basename = if id_subext.is_none() {
+			format!("pathchunk_{:08}.sig.bin", path_chunk)			
+		} else {
+			format!("pathchunk_{:08}.{:}.sig.bin", path_chunk, id_subext.unwrap())	
+		};
+
 		storage_loc.clone()
 			.join(format!("band_{:016}", band_id))
 			.join(format!("sigchunk_{:08}", sig_chunk))
-			.join(format!("pathchunk_{:08}.sig.bin", path_chunk))
+			.join(basename)
 	}
 
-	pub fn get_input_output_filenames(&self, output_loc: &PathBuf, path_chunk: usize) -> Vec<(PathBuf, PathBuf)> {
-		let mut io_pairs : Vec<(PathBuf, PathBuf)> = Vec::new();
-		for band_id in &self.band_ids {
-			for sig_chunk in 0..self.num_sig_chunks {
-				let input_filename = SignatureWriter::get_filename(&self.storage_loc, *band_id, sig_chunk, path_chunk);
-				let output_filename = SignatureWriter::get_filename(output_loc, *band_id, sig_chunk, path_chunk);
-				io_pairs.push((input_filename, output_filename));
-			}
-		}
-		io_pairs
-	}
 
 	pub fn write_line(&self, band_id: u32, sig_chunk: usize, contents: Vec<u8>) -> Result<(), Error> {
 		let key = (band_id, sig_chunk);

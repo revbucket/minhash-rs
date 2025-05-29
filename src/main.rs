@@ -167,7 +167,10 @@ enum Commands {
         path_chunk: usize,
 
         #[arg(long, default_value_t=1)]
-        num_path_chunks: usize
+        num_path_chunks: usize,
+
+        #[arg(long)]
+        id_subext: Option<String>
     },
 
 
@@ -457,7 +460,7 @@ fn create_file_map(local_input: &PathBuf, remote_input: &PathBuf) -> Result<File
 
 
 
-fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Result<(), Error> {
+fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize, id_subext: Option<String>) -> Result<(), Error> {
     println!("Starting part of Minhash run | config {:?} | chunk {:?}/{:?}", config, path_chunk, num_path_chunks);
     let start_main = Instant::now();    
 
@@ -483,7 +486,7 @@ fn hash_only(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> Res
     let sig_storage = working_dir.clone().join("sig_storage");
     create_dir_all(&sig_storage).unwrap();
     let num_sig_chunks = config_obj.num_sig_chunks;
-    let signature_writer = SignatureWriter::new(&sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk);
+    let signature_writer = SignatureWriter::new(&sig_storage, band_seeds.clone(), num_sig_chunks, path_chunk, &id_subext);
     let path_size = to_byte_size(file_map.indices.len());
     let line_size = to_byte_size(config_obj.max_lines_per_path);
     let sig_size = compute_sig_size(config_obj.num_docs);
@@ -1302,7 +1305,7 @@ fn parse_clean_metadata_file(clean_file: &PathBuf) -> Result<DashMap<usize, Vec<
 fn minhash(config: &PathBuf) -> Result<(), Error> {
     // Note: this is only for SMALL runs. We set some hyperparameters for you, and this isn't optimized for these use cases
     build_file_map(&config).unwrap();
-    hash_only(&config, 0, 1).unwrap();
+    hash_only(&config, 0, 1, None).unwrap();
     gather_edges(&config).unwrap();
     build_uf(&config, 1).unwrap();
     clean_files(&config, 0, 1).unwrap();     
@@ -1343,8 +1346,8 @@ fn main() {
         },
 
 
-        Commands::HashOnly {config, path_chunk, num_path_chunks} => {
-            hash_only(config, *path_chunk, *num_path_chunks)
+        Commands::HashOnly {config, path_chunk, num_path_chunks, id_subext} => {
+            hash_only(config, *path_chunk, *num_path_chunks, id_subext.clone())
         },
 
         Commands::GatherEdges {config} => {
