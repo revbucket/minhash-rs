@@ -1151,7 +1151,9 @@ fn clean_files(config: &PathBuf, path_chunk: usize, num_path_chunks: usize) -> R
     let metadata_dir = working_dir.clone().join("clean");
     let file_map = FileMap::load(&PathBuf::from(working_dir.clone()).join("filemap.json.gz")).unwrap();
     let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);
-
+    let path_chunk_files: Vec<(PathBuf, usize)> = path_chunk_files.into_par_iter().filter(|(path, _path_id)| {
+        input_dir.join(path).exists()
+    }).collect();    
     let concat_key = config_obj.concat_key;
 
     // Parse the metadata into a map from path_id -> [(line_num, cc_id, cc_size, cc_idx),...]
