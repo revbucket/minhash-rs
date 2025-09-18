@@ -1,6 +1,7 @@
 """
 Run this utility to generate the file map (helpful because I don't let rust talk to s3)
 """
+import glob
 import json
 import os
 from urllib.parse import urlparse
@@ -40,19 +41,24 @@ def list_s3_files(bucket_name, prefix, contains=None):
     return file_list
 
 
-def clickfree_build_file_map(storage_dir):
-    working_dir = config_data["working_dir"]
+def clickfree_build_file_map(storage_dir, remote_dir):
     os.makedirs(storage_dir, exist_ok=True)
 
-    bucket, prefix = parse_s3_uri(config_data["remote_input"])
-    files = list_s3_files(bucket, prefix, contains=".jsonl")
+    if remote_dir.startswith("s3://"):
+        bucket, prefix = parse_s3_uri(s3_dir)
+        files = list_s3_files(bucket, prefix, contains=".jsonl")
+    else:
+        files = [
+            filename
+            for filename in glob.glob(os.path.join(remote_dir, "**/*"), recursive=True)
+            if ".jsonl" in filename
+        ]
+
     file_map_loc = os.path.join(storage_dir, "filemap.json.gz")
     file_map_contents = {
-        "local_input": config_data["local_input"],
-        "remote_input": config_data["remote_input"],
+        "remote_input": s3_dir,
         "indices": {
-            p.replace(config_data["remote_input"], "").lstrip("/"): i
-            for i, p in enumerate(files)
+            p.replace(remote_dir, "").lstrip("/"): i for i, p in enumerate(files)
         },
     }
 
@@ -64,8 +70,13 @@ def clickfree_build_file_map(storage_dir):
 @click.option(
     "--storage_dir", required=True, help="Location where filemap.json.gz should live"
 )
+@click.option(
+    "--remote_dir",
+    required=True,
+    help="Location (either s3 or local) where the data lives",
+)
 def build_file_map(config: str):
-    return clickfree_build_file_map(storage_dir)
+    return clickfree_build_file_map(storage_dir, remote_dir)
 
 
 if __name__ == "__main__":
