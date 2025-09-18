@@ -41,12 +41,16 @@ def read_intX(bytestring):
     return result
 
 
-def get_sizes(config):
+def get_sizes(storage_dir, config):
+    # Assumes that the values in the config are the true ones (and have not been overridden)
     config_data = yaml.safe_load(open(config, "r"))
-    max_lines_per_path = config_data["max_lines_per_path"]
-    num_docs = config_data["num_docs"]
 
-    file_map_loc = os.path.join(config_data["working_dir"], "filemap.json.gz")
+    max_lines_per_path = config_data.get("eng_params", {}).get(
+        "max_lines_per_path", 1_000_000_000
+    )
+    num_docs = config_data.get("eng_params", {}).get("num_docs", 1_000_000_000)
+
+    file_map_loc = os.path.join(storage_dir, "filemap.json.gz")
     file_map = json.loads(open(file_map_loc, "rb").read())
 
     path_size = to_byte_size(len(file_map["indices"]))
@@ -61,7 +65,7 @@ def get_sizes(config):
 # =====================================================
 
 
-def read_all_sig_files(sig_dir, config):
+def read_all_sig_files(sig_dir, storage_dir, config):
     # Returns a list of (band_id, path_id, line_num, signature)
 
     files = glob.glob(os.path.join(sig_dir, "**/*.sig.bin"), recursive=True)
@@ -73,7 +77,7 @@ def read_all_sig_files(sig_dir, config):
     return all_data
 
 
-def read_signature_file(sig_file, config):
+def read_signature_file(sig_file, storage_dir, config):
     # Returns a list of (path_id, line_num, signature)
     data = open(sig_file, "rb").read()
 
@@ -93,17 +97,7 @@ def read_signature_file(sig_file, config):
 # =====================================================
 
 
-def read_singletons(singleton_file):
-    data = open(singleton_file, "rb").read()
-    singletons = {}
-    for byte_start in range(0, len(data), 16):
-        k = data[byte_start : byte_start + 8]
-        v = data[byte_start + 8 : byte_start + 16]
-        singletons[unpack_u64le(k)] = unpack_u64le(v)
-    return singletons
-
-
-def read_edge_file(edge_file, config):
+def read_edge_file(edge_file, storage_dir, config):
     path_size, line_size, _ = get_sizes(config)
     data = open(edge_file, "rb").read()
 
@@ -132,68 +126,40 @@ def read_edge_file(edge_file, config):
 # =====================================================
 
 
-def read_cc_file(cc_file):
-    data = open(cc_file, "rb").read()
+def read_clean_file(clean_file):
+    data = open(clean_file, "rb").read()
+    metadata = [unpack_u64le(data[i * 8 : i * 8 + 8]) for i in range(5)]
+    entry_size = sum(metadata)
 
-    ccs = []
-    cur_group = []
-    for i in range(0, len(data), 16):
-        l, r = data[i : i + 8], data[i + 8 : i + 16]
-        x, y = unpack_u64le(l), unpack_u64le(r)
-        if (x, y) == (MAX_U64, MAX_U64):
-            ccs.append(cur_group)
-            cur_group = []
-        else:
-            cur_group.append((x, y))
-    return ccs
+    path_size, line_size, cc_id_size, cc_size = (
+        metadata[0],
+        metadata[1],
+        metadata[2],
+        metadata[3],
+    )
 
+    entries = [data[i : i + entry_size] for i in range(40, len(data), entry_size)]
 
-def read_kill_file(kill_file):
-    data = open(kill_file, "rb").read()
+    def parse_entry(entry):
+        path_num = read_intX(entry[:path_size])
+        line_num = read_intX(entry[path_size : path_size + line_size])
+        cc_id = read_intX(
+            entry[path_size + line_size : path_size + line_size + cc_id_size]
+        )
+        cc_size = read_intX(
+            entry[
+                path_size
+                + line_size
+                + cc_id_size : path_size
+                + line_size
+                + cc_id_size
+                + cc_size
+            ]
+        )
+        cc_idx = read_intX(entry[-cc_size:])
+        return (path_num, line_num, cc_id, cc_size, cc_idx)
 
-    kill_dict = defaultdict(list)
-    new_group = True
-    group_id = None
-    cur_lines = []
-    for i in range(0, len(data), 8):
-        x = unpack_u64le(data[i : i + 8])
-        if new_group:
-            group_id = x
-            new_group = False
-        elif x == MAX_U64:
-            kill_dict[group_id].append(cur_lines)
-            cur_lines = []
-            new_group = True
-        else:
-            cur_lines.append(x)
-    assert cur_lines == []
-    return kill_dict
-
-
-def read_anno_file(anno_file):
-    data = open(anno_file, "rb").read()
-    anno_dict = defaultdict(list)
-    new_group = True
-    groups = []
-    cur = []
-    for i in range(0, len(data), 8):
-        x = unpack_u64le(data[i : i + 8])
-        if x == MAX_U64:
-            groups.append(cur)
-            cur = []
-        else:
-            cur.append(x)
-
-    for group in groups:
-        path_id = group.pop(0)
-        trips = []
-        for i in range(0, len(group), 3):
-            anno_dict[path_id].append((group[i], group[i + 1], group[i + 2]))
-
-    for v in anno_dict.values():
-        v.sort(key=lambda p: p[0])
-
-    return anno_dict
+    return [parse_entry(entry) for entry in entries]
 
 
 # =====================================================

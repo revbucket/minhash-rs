@@ -1,5 +1,30 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+/*
+MIT License
+
+Copyright (C) Kambiz Khojasteh
+Modifications (c) 2025 Allen Institute for AI
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Constant defining the number of `rank` bits in a node represented as a `usize`.
 const RANK_BITS: u32 = usize::BITS.ilog2();
@@ -36,8 +61,8 @@ impl UFRush {
     /// # Panics
     /// This method will panic if the `size` exceeds the [`MAX_SIZE`].
     pub fn new() -> Self {
-        let nodes : DashMap<usize, AtomicUsize> = DashMap::new();
-        Self {nodes}
+        let nodes: DashMap<usize, AtomicUsize> = DashMap::new();
+        Self { nodes }
     }
 
     /// Returns the total number of elements in the union-find structure.
@@ -131,7 +156,6 @@ impl UFRush {
         x
     }
 
-
     pub fn find_path_compression(&self, mut x: usize) -> usize {
         self.nodes.entry(x).or_insert(AtomicUsize::new(x));
 
@@ -147,16 +171,15 @@ impl UFRush {
             let x_parent = parent(x_node);
             let x_new_node = encode(root, rank(x_node));
             let _ = self.nodes.get(&x).unwrap().compare_exchange_weak(
-                x_node, 
+                x_node,
                 x_new_node,
                 Ordering::Release,
-                Ordering::Relaxed
+                Ordering::Relaxed,
             );
             x = x_parent;
         }
         root
     }
-
 
     /// Unites the subsets that contain `x` and `y`.
     ///
@@ -211,7 +234,10 @@ impl UFRush {
             // assign the new root to be y
             let new_value = encode(y_rep, x_rank);
             // change the value of the smaller subtree root to point to the other one
-            if self.nodes.get(&x_rep).unwrap()
+            if self
+                .nodes
+                .get(&x_rep)
+                .unwrap()
                 .compare_exchange(cur_value, new_value, Ordering::Release, Ordering::Acquire)
                 .is_ok()
             {

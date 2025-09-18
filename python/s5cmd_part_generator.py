@@ -22,10 +22,9 @@ def get_path_chunk_stems(file_map_json: dict, chunk_id: int, num_chunks: int):
     ]
 
 
-def clickfree_get_s5cmd_generator(config: str, chunk_id: int, num_chunks: int):
+def clickfree_get_s5cmd_generator(storage_dir: str, chunk_id: int, num_chunks: int):
     config_data = yaml.safe_load(open(config, "r"))
-    working_dir = config_data["working_dir"]
-    file_map_loc = os.path.join(working_dir, "filemap.json.gz")
+    file_map_loc = os.path.join(storage_dir, "filemap.json.gz")
     file_map_json = json.loads(open(file_map_loc, "rb").read())
 
     path_chunk_stems = get_path_chunk_stems(file_map_json, chunk_id, num_chunks)
@@ -36,7 +35,7 @@ def clickfree_get_s5cmd_generator(config: str, chunk_id: int, num_chunks: int):
     )
 
     s5cmd_file = os.path.join(
-        working_dir, "s5cmd_downloader_%08d_%08d.txt" % (chunk_id, num_chunks)
+        storage_dir, "s5cmd_downloader_%08d_%08d.txt" % (chunk_id, num_chunks)
     )
     print(
         "S%C",
@@ -50,11 +49,13 @@ def clickfree_get_s5cmd_generator(config: str, chunk_id: int, num_chunks: int):
 
 
 @click.command()
-@click.option("--config", required=True, help="Path to config.yaml file")
+@click.option(
+    "--storage_dir", required=True, help="Path to directory where filemap.json.gz lives"
+)
 @click.option("--chunk-id", default=0)
 @click.option("--num-chunks", default=1)
-def get_s5cmd_generator(config: str, chunk_id: int, num_chunks: int):
-    return clickfree_get_s5cmd_generator(config, chunk_id, num_chunks)
+def get_s5cmd_generator(storage_dir: str, chunk_id: int, num_chunks: int):
+    return clickfree_get_s5cmd_generator(storage_dir, chunk_id, num_chunks)
 
 
 if __name__ == "__main__":
