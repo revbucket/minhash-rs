@@ -254,7 +254,6 @@ fn prune_group(
             }
         })
     }
-    let kept_docs = AtomicUsize::new(0);
     vlist.par_iter().for_each(|p| {
         let contents = read_pathbuf_to_mem(p).unwrap();
         let mut output_contents: Vec<u8> = Vec::new();
@@ -275,8 +274,6 @@ fn prune_group(
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
                 if count == 1 {
-                    kept_docs.fetch_add(1, Ordering::SeqCst);
-                    //kept_docs += 1;
                     output_contents.extend(line.into_bytes());
                     output_contents.push(b'\n');
                 }
@@ -287,9 +284,8 @@ fn prune_group(
             write_mem_to_pathbuf(&output_contents, &output_filename).unwrap();
         }
     });
-    println!("{:?} | {:?} kept", vlist, kept_docs.into_inner());
-    let ccs = counter.len();
+    let kept_docs = counter.len();
     let docs_seen = counter.into_par_iter().map(|(_k, v)| v).sum::<usize>();
 
-    Ok((docs_seen, ccs))
+    Ok((docs_seen, kept_docs))
 }

@@ -756,8 +756,8 @@ impl GenWriter {
             hasher.finish() as usize % self.num_chunks
         };
 
-        let binding = self.writer.get(&chunk_id).unwrap();
-        let mut cc_writer = binding.lock().unwrap();
+        let writer_arc = self.writer.get(&chunk_id).unwrap().clone();
+        let mut cc_writer = writer_arc.lock().unwrap();
         cc_writer.write(&contents).unwrap();
         if cc_writer.bytes_written > self.max_size {
             cc_writer.flush().unwrap();
@@ -772,7 +772,7 @@ impl GenWriter {
             )
             .unwrap();
         }
-
+        drop(cc_writer); // only addition to be made?
         Ok(())
     }
 
