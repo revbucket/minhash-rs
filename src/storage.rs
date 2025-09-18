@@ -633,9 +633,9 @@ impl WriterState {
     }
 
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let bytes_written = self.writer.write(buf)?;
-        self.bytes_written += bytes_written;
-        Ok(bytes_written)
+        self.writer.write_all(buf).unwrap();
+        self.bytes_written += buf.len();
+        Ok(self.bytes_written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
