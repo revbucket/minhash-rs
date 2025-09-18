@@ -156,7 +156,7 @@ pub fn group_docs(
                 }
                 128 => {
                     let hash_value = xxh3_128(text.as_bytes());
-                    json_set(&mut json_line, &hash_key, json!(hash_value)).unwrap();
+                    json_set(&mut json_line, &hash_key, json!(hash_value.to_string())).unwrap();
                     (hash_value % (num_bins as u128)) as usize
                 }
                 _ => {
@@ -194,7 +194,7 @@ pub fn exact_dedup_disk_prune(
     let docs_kept = AtomicUsize::new(0);
     let input_paths = expand_dirs(vec![storage_dir.to_path_buf()], None).unwrap();
     // All should have naming conventions like chunk_{:08}.{}.bin
-    let re = Regex::new(r"chunk_(\d{8}\.").unwrap();
+    let re = Regex::new(r"chunk_(\d{8})\.").unwrap();
     let mut groups: HashMap<usize, Vec<PathBuf>> = HashMap::new();
     for p in input_paths {
         let base_name = p.file_name().unwrap().to_str().unwrap();
@@ -254,7 +254,7 @@ fn prune_group(
             }
         })
     }
-
+    let kept_docs = AtomicUsize::new(0);
     vlist.par_iter().for_each(|p| {
         let contents = read_pathbuf_to_mem(p).unwrap();
         let mut output_contents: Vec<u8> = Vec::new();
@@ -275,6 +275,8 @@ fn prune_group(
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
                 if count == 1 {
+                    kept_docs.fetch_add(1, Ordering::SeqCst);
+                    //kept_docs += 1;
                     output_contents.extend(line.into_bytes());
                     output_contents.push(b'\n');
                 }
@@ -285,9 +287,9 @@ fn prune_group(
             write_mem_to_pathbuf(&output_contents, &output_filename).unwrap();
         }
     });
+    println!("{:?} | {:?} kept", vlist, kept_docs.into_inner());
     let ccs = counter.len();
     let docs_seen = counter.into_par_iter().map(|(_k, v)| v).sum::<usize>();
-    let docs_kept = docs_seen - ccs;
 
-    Ok((docs_seen, docs_kept))
+    Ok((docs_seen, ccs))
 }

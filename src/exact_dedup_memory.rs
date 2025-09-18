@@ -57,6 +57,7 @@ impl DocHash for u128 {
         xxh3_128(text.as_bytes())
     }
     fn from_json(value: &Value) -> Result<Self, Error> {
+        println!("VALUE IS {:?}", value.as_str());
         Ok(value.as_str().unwrap().parse::<u128>().unwrap())
     }
     fn to_json(&self) -> Value {
@@ -113,6 +114,8 @@ fn exact_dedup_impl<K: DocHash>(
     annotate: Option<String>,
 ) -> Result<(usize, usize), Error> {
     let input_paths = expand_dirs(vec![input_dir.clone()], None).unwrap();
+    println!("INPUT DIR {:?}", input_dir.clone());
+    println!("INPUT FILES {:?}", input_paths);
     let seen_docs = AtomicUsize::new(0);
     let kept_docs = AtomicUsize::new(0);
     let counter: DashMap<K, usize> = DashMap::new();
@@ -161,7 +164,12 @@ fn exact_dedup_file<K: DocHash>(
     annotate: &Option<String>,
 ) -> Result<(usize, usize), Error> {
     let mut seen = 0;
-    let mut kept = 0;
+    let mut kept = if let Some(_anno) = annotate {
+        counter.len()
+    } else { 
+        0
+    };
+
     let mut output_contents: Vec<u8> = Vec::new();
 
     let data = read_pathbuf_to_mem(&p).unwrap();
@@ -189,6 +197,8 @@ fn exact_dedup_file<K: DocHash>(
     if output_contents.len() > 0 {
         write_mem_to_pathbuf(&output_contents, &output_filename).unwrap()
     }
+
+
 
     Ok((seen, kept))
 }
