@@ -166,9 +166,9 @@ pub fn group_docs(
                     ))
                 }
             };
-            line = serde_json::to_vec(&json_line).unwrap();
             bin_number
         };
+        line = serde_json::to_vec(&json_line).unwrap();        
         line.push(b'\n');
         gen_writer.write_line(0, line, bin_number).unwrap();
 
