@@ -24,7 +24,7 @@ def get_path_chunk_stems(filemap_json: dict, chunk_id: int, num_chunks: int):
 
 
 def clickfree_get_s5cmd_generator(
-    filemap: str, local_dir: str, storage_dir: str, chunk_id: int, num_chunks: int
+    filemap: str, local_dir: str, output_dir: str, chunk_id: int, num_chunks: int
 ):
     # Read filemap
     if filemap.startswith("s3://"):
