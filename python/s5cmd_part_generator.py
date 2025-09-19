@@ -26,16 +26,15 @@ def get_path_chunk_stems(filemap_json: dict, chunk_id: int, num_chunks: int):
 def clickfree_get_s5cmd_generator(
     filemap: str, local_dir: str, storage_dir: str, chunk_id: int, num_chunks: int
 ):
-    
     # Read filemap
-    if filemap.startswith('s3://'):
-        s3_parts = s3_uri.replace('s3://', '').split('/', 1)
+    if filemap.startswith("s3://"):
+        s3_parts = s3_uri.replace("s3://", "").split("/", 1)
         bucket_name = parts[0]
         key = parts[1]
-        filemap_response = boto3.client('s3').get_object(Bucket=bucket_name, Key=key)
-        filemap_content = gzip.decompress(response['Body'].read())
+        filemap_response = boto3.client("s3").get_object(Bucket=bucket_name, Key=key)
+        filemap_content = gzip.decompress(response["Body"].read())
     else:
-        filemap_content = open(filemap, 'rb').read()
+        filemap_content = open(filemap, "rb").read()
     filemap_json = json.loads(filemap_content)
 
     # Make output string
@@ -56,17 +55,17 @@ def clickfree_get_s5cmd_generator(
     output_str = "\n".join([line_namer(stem) for stem in path_chunk_stems])
 
     # Save output string
-    if output_dir.startswith('s3://'):
-        s3_parts = s3_uri.replace('s3://', '').split('/', 1)
+    if output_dir.startswith("s3://"):
+        s3_parts = s3_uri.replace("s3://", "").split("/", 1)
         bucket_name = parts[0]
-        key = parts[1]        
-        s3_client = boto3.client('s3')        
+        key = parts[1]
+        s3_client = boto3.client("s3")
         s3_client.put_object(
             Bucket=bucket_name,
             Key=key,
-            Body=output_str.encode('utf-8'),  # Convert string to bytes
-            ContentType='text/plain'
-        )        
+            Body=output_str.encode("utf-8"),  # Convert string to bytes
+            ContentType="text/plain",
+        )
     else:
         with open(s5cmd_file, "w") as f:
             f.write(output_str)
@@ -86,12 +85,16 @@ def clickfree_get_s5cmd_generator(
 @click.option(
     "--output-dir",
     required=True,
-    help="Where the download file lives -- (could be on s3)")
-
+    help="Where the download file lives -- (could be on s3)",
+)
 @click.option("--chunk-id", default=0)
 @click.option("--num-chunks", default=1)
-def get_s5cmd_generator(filemap: str, local_dir: str, output_dir: str, chunk_id: int, num_chunks: int):
-    return clickfree_get_s5cmd_generator(filemap, local_dir, output_dir chunk_id, num_chunks)
+def get_s5cmd_generator(
+    filemap: str, local_dir: str, output_dir: str, chunk_id: int, num_chunks: int
+):
+    return clickfree_get_s5cmd_generator(
+        filemap, local_dir, output_dir, chunk_id, num_chunks
+    )
 
 
 if __name__ == "__main__":
