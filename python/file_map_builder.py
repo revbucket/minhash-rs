@@ -75,7 +75,7 @@ def clickfree_build_file_map(storage_dir, remote_dir):
     required=True,
     help="Location (either s3 or local) where the data lives",
 )
-def build_file_map(config: str):
+def build_file_map(storage_dir: str, remote_dir: str):
     return clickfree_build_file_map(storage_dir, remote_dir)
 
 
