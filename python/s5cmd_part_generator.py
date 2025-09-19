@@ -67,6 +67,7 @@ def clickfree_get_s5cmd_generator(
             ContentType="text/plain",
         )
     else:
+        os.makedirs(output_dir, exist_ok=True)
         with open(s5cmd_file, "w") as f:
             f.write(output_str)
 
