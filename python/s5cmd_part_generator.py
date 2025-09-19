@@ -57,8 +57,8 @@ def clickfree_get_s5cmd_generator(
     # Save output string
     if output_dir.startswith("s3://"):
         s3_parts = output_dir.replace("s3://", "").split("/", 1)
-        bucket_name = parts[0]
-        key = parts[1]
+        bucket_name = s3_parts[0]
+        key = s3_parts[1]
         s3_client = boto3.client("s3")
         s3_client.put_object(
             Bucket=bucket_name,
