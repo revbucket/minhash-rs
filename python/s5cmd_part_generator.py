@@ -40,7 +40,7 @@ def clickfree_get_s5cmd_generator(
     # Make output string
     path_chunk_stems = get_path_chunk_stems(filemap_json, chunk_id, num_chunks)
     line_namer = lambda stem: "cp %s %s" % (
-        os.path.join(config_data["remote_input"], stem),
+        os.path.join(filemap_json["remote_input"], stem),
         os.path.join(local_dir, stem),
     )
 
