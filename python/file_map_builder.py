@@ -45,7 +45,7 @@ def clickfree_build_file_map(storage_dir, remote_dir):
     os.makedirs(storage_dir, exist_ok=True)
 
     if remote_dir.startswith("s3://"):
-        bucket, prefix = parse_s3_uri(s3_dir)
+        bucket, prefix = parse_s3_uri(remote_dir)
         files = list_s3_files(bucket, prefix, contains=".jsonl")
     else:
         files = [
@@ -56,7 +56,7 @@ def clickfree_build_file_map(storage_dir, remote_dir):
 
     file_map_loc = os.path.join(storage_dir, "filemap.json.gz")
     file_map_contents = {
-        "remote_input": s3_dir,
+        "remote_input": remote_dir,
         "indices": {
             p.replace(remote_dir, "").lstrip("/"): i for i, p in enumerate(files)
         },
