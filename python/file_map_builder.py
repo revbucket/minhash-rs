@@ -68,10 +68,10 @@ def clickfree_build_file_map(storage_dir, remote_dir):
 
 @click.command()
 @click.option(
-    "--storage_dir", required=True, help="Location where filemap.json.gz should live"
+    "--storage-dir", required=True, help="Location where filemap.json.gz should live"
 )
 @click.option(
-    "--remote_dir",
+    "--remote-dir",
     required=True,
     help="Location (either s3 or local) where the data lives",
 )
