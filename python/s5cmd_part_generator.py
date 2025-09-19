@@ -28,7 +28,7 @@ def clickfree_get_s5cmd_generator(
 ):
     # Read filemap
     if filemap.startswith("s3://"):
-        s3_parts = s3_uri.replace("s3://", "").split("/", 1)
+        s3_parts = filemap.replace("s3://", "").split("/", 1)
         bucket_name = parts[0]
         key = parts[1]
         filemap_response = boto3.client("s3").get_object(Bucket=bucket_name, Key=key)
@@ -56,7 +56,7 @@ def clickfree_get_s5cmd_generator(
 
     # Save output string
     if output_dir.startswith("s3://"):
-        s3_parts = s3_uri.replace("s3://", "").split("/", 1)
+        s3_parts = output_dir.replace("s3://", "").split("/", 1)
         bucket_name = parts[0]
         key = parts[1]
         s3_client = boto3.client("s3")
