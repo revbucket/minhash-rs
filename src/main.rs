@@ -268,6 +268,9 @@ enum Commands {
     },
 
     MhHashDocs {
+        #[arg(required=true, long)]
+        local_input: PathBuf,
+
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
@@ -584,6 +587,7 @@ fn main() {
         } => mh_build_file_map(input_dir, storage_dir),
 
         Commands::MhHashDocs {
+            local_input,
             storage_dir,
             text_key,
             config,
@@ -598,6 +602,7 @@ fn main() {
             max_lines_per_path,
             num_sig_chunks,
         } => mh_hash_docs(
+            local_input,
             storage_dir,
             text_key,
             config,

@@ -57,7 +57,7 @@ pub fn minhash_memory(
     let file_map = FileMap::new(input_dir, &None).unwrap();
 
     // Then create the hashes of all documents and store them in storage_dir
-    hash_only(&config_obj, &file_map, storage_dir, text_key, 0, 1, None).unwrap();
+    hash_only(&config_obj, &file_map, storage_dir, text_key, 0, 1, None, None).unwrap();
 
     // And then group into edges and build the union find
     gather_edges(&config_obj, &file_map, storage_dir).unwrap();

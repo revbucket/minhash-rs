@@ -229,6 +229,7 @@ pub fn hash_only(
     path_chunk: usize,
     num_path_chunks: usize,
     id_subext: Option<String>,
+    local_input: Option<PathBuf>,
 ) -> Result<(), Error> {
     println!(
         "Starting part of Minhash run | config {:?} | chunk {:?}/{:?}",
@@ -249,7 +250,12 @@ pub fn hash_only(
     );
 
     // -- Get files to hash
-    let local_input = file_map.local_input.clone();
+
+    let local_input = if let Some(local_input) = local_input {
+        local_input
+    } else {
+        file_map.local_input.clone()
+    };
     let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);
     let this_chunk: Vec<(PathBuf, usize)> = this_chunk
         .into_par_iter()

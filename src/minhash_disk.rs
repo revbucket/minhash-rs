@@ -17,6 +17,7 @@ pub fn mh_build_file_map(input_dir: &PathBuf, storage_dir: &PathBuf) -> Result<(
 }
 
 pub fn mh_hash_docs(
+    local_input: &PathBuf,
     storage_dir: &PathBuf,
     text_key: &String,
     config: &Option<PathBuf>,
@@ -58,6 +59,7 @@ pub fn mh_hash_docs(
         path_chunk,
         num_path_chunks,
         None,
+        Some(local_input.clone())
     )
 }
 
