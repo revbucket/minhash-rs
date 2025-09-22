@@ -996,7 +996,7 @@ pub fn clean_files(
 ) -> Result<(), Error> {
     println!("Starting UF-based pruning...");
     let start_main = Instant::now();
-    let output_config_obj = &config_obj.output;
+    let output_config_obj = &config_obj.output_params;
 
     let metadata_dir = storage_dir.clone().join("clean");
     let path_chunk_files = file_map.get_path_chunk(path_chunk, num_path_chunks);

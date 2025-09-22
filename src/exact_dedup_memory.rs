@@ -100,7 +100,7 @@ pub fn exact_dedup_memory(
         "Saw {:?} documents, and kept {:?} of them",
         seen_docs, kept_docs
     );
-    println!("Removal rate was {:.2}", removal_rate);
+    println!("Removal rate was {:.2}%", removal_rate);
 
     Ok(())
 }

@@ -44,7 +44,7 @@ pub fn mh_hash_docs(
             max_lines_per_path: max_lines_per_path,
             num_sig_chunks: num_sig_chunks,
         },
-        output: OutputOverrides::default(),
+        output_params: OutputOverrides::default(),
     };
     let config_obj = Config::load_with_overrides(config.clone(), overrides).unwrap();
 
@@ -74,7 +74,7 @@ pub fn mh_gather_edges(
             max_lines_per_path: max_lines_per_path,
             num_sig_chunks: None,
         },
-        output: OutputOverrides::default(),
+        output_params: OutputOverrides::default(),
     };
     let config_obj = Config::load_with_overrides(config.clone(), overrides).unwrap();
 
@@ -96,7 +96,7 @@ pub fn mh_build_uf(
             max_lines_per_path: max_lines_per_path,
             num_sig_chunks: None,
         },
-        output: OutputOverrides::default(),
+        output_params: OutputOverrides::default(),
     };
     let config_obj = Config::load_with_overrides(config.clone(), overrides).unwrap();
 
@@ -125,7 +125,7 @@ pub fn mh_clean_files(
             max_lines_per_path: None,
             num_sig_chunks: None,
         },
-        output: OutputOverrides {
+        output_params: OutputOverrides {
             annotate: annotate,
             annotate_key: annotate_key,
             delete_while_cleaning: delete_while_cleaning,

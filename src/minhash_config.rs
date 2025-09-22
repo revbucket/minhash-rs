@@ -21,7 +21,7 @@ const DEFAULT_ANNOTATE_KEY: &str = "minhash.fuzzy";
 pub struct Config {
     pub minhash_params: MinHashParams,
     pub eng_params: EngParams,
-    pub output: OutputParams,
+    pub output_params: OutputParams,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,7 +60,7 @@ pub struct OutputParams {
 pub struct ConfigOverrides {
     pub minhash_params: MinHashOverrides,
     pub eng_params: EngOverrides,
-    pub output: OutputOverrides,
+    pub output_params: OutputOverrides,
 }
 
 #[derive(Debug, Default)]
@@ -126,7 +126,7 @@ impl Default for Config {
         Self {
             minhash_params: MinHashParams::default(),
             eng_params: EngParams::default(),
-            output: OutputParams::default(),
+            output_params: OutputParams::default(),
         }
     }
 }
@@ -136,7 +136,7 @@ impl ConfigOverrides {
     pub fn apply_to(self, config: &mut Config) {
         self.minhash_params.apply_to(&mut config.minhash_params);
         self.eng_params.apply_to(&mut config.eng_params);
-        self.output.apply_to(&mut config.output);
+        self.output_params.apply_to(&mut config.output_params);
     }
 }
 

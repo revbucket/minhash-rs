@@ -44,7 +44,7 @@ pub fn minhash_memory(
             max_lines_per_path: None,
             num_sig_chunks: None,
         },
-        output: OutputOverrides {
+        output_params: OutputOverrides {
             annotate: annotate,
             annotate_key: annotate_key,
             delete_while_cleaning,
