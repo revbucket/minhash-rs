@@ -920,7 +920,7 @@ fn make_pruning_metadata(
     }
 
     let cc_idxs: DashMap<usize, usize> = DashMap::new();
-    let clean_writer = GenWriter::new(&clean_dir, num_path_chunks, "clean", &None, false, None);
+    let clean_writer = GenWriter::new(&clean_dir, num_path_chunks, "clean", &None, false, Some(usize::MAX));
     let metadata_header: Vec<u8> = vec![
         (path_size as u64).to_le_bytes(),
         (line_size as u64).to_le_bytes(),
