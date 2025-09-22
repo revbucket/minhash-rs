@@ -92,7 +92,7 @@ PARALLELISM STRATEGY: This should be global:
 
 #[derive(Serialize, Deserialize)]
 pub struct FileMap {
-    pub local_input: PathBuf,
+    pub local_input: Option<PathBuf>,
     pub remote_input: Option<PathBuf>,
     pub indices: HashMap<PathBuf, usize>,
 }
@@ -113,7 +113,7 @@ impl FileMap {
             .map(|(i, p)| (p.clone(), i))
             .collect();
         Ok(FileMap {
-            local_input: local_input.clone(),
+            local_input: Some(local_input.clone()),
             remote_input: remote_input.clone(),
             indices,
         })
@@ -254,7 +254,7 @@ pub fn hash_only(
     let local_input = if let Some(local_input) = local_input {
         local_input
     } else {
-        file_map.local_input.clone()
+        file_map.local_input.clone().unwrap()
     };
     let this_chunk = file_map.get_path_chunk(path_chunk, num_path_chunks);
     let this_chunk: Vec<(PathBuf, usize)> = this_chunk
