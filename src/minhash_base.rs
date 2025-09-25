@@ -455,7 +455,11 @@ fn _init_permutations(seeds: &Vec<u64>) -> Array1<u128> {
     let mut a = Array1::zeros(n);
     for (i, &seed) in seeds.iter().enumerate() {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
-        a[i] = rng.gen::<u128>() as u128;
+        let mut coeff = rng.gen::<u128>() as u128;
+        if coeff % 2 == 0 {
+            coeff += 1;
+        }
+        a[i] = coeff;
     }
     a
 }
