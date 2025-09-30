@@ -937,7 +937,7 @@ fn make_pruning_metadata(
     .collect();
     (0..num_path_chunks).into_par_iter().for_each(|i| {
         clean_writer
-            .write_line(0, metadata_header.clone(), i)
+            .write_line(0, metadata_header.clone(), Some(i))
             .unwrap();
     });
 
@@ -975,7 +975,7 @@ fn make_pruning_metadata(
         .into_iter()
         .flat_map(|s| s)
         .collect();
-        clean_writer.write_line(0, contents, path_chunk).unwrap();
+        clean_writer.write_line(0, contents, Some(path_chunk)).unwrap();
         pbar.inc(1);
     });
     clean_writer.finish().unwrap();
