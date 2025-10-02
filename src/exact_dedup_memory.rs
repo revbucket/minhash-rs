@@ -1,3 +1,31 @@
+//! # In-Memory Exact Deduplication
+//!
+//! Fast, parallel exact deduplication of JSONL files using xxHash3 for duplicate detection.
+//!
+//! ## Overview
+//!
+//! This module removes documents with identical content by computing hash values
+//! and tracking which hashes have been seen. Uses xxHash3 for fast, high-quality
+//! hashing with minimal collisions.
+//!
+//! ## Features
+//!
+//! - **Fast hashing**: xxHash3 is one of the fastest non-cryptographic hash functions
+//! - **Parallel processing**: Multi-threaded file processing using Rayon
+//! - **Flexible hash sizes**: 64-bit (good for ~4 billion documents) or 128-bit (virtually unlimited)
+//! - **Pre-computed hashes**: Can use existing hash fields instead of recomputing
+//! - **Annotation mode**: Add duplicate metadata instead of removing documents
+//!
+//! ## Hash Size Selection
+//!
+//! - **64-bit**: Sufficient for most use cases (up to ~4 billion documents with low collision risk)
+//! - **128-bit**: Use for massive datasets or when collision risk must be minimized
+//!
+//! Birthday paradox collision probability:
+//! - 64-bit: 50% collision chance at ~5 billion documents
+//! - 128-bit: 50% collision chance at ~2^64 documents (not a practical concern)
+
+
 use anyhow::{anyhow, Error, Result};
 use dashmap::DashMap;
 use rayon::prelude::*;
@@ -34,12 +62,20 @@ Fast, parallel deduplication of JSONL files using xxHash3 for duplicate detectio
 /*=======================================================
 =                     HELPER DATA TYPES                 =
 =======================================================*/
-
+/// Trait for document hash values supporting both 64-bit and 128-bit modes.
+///
+/// Provides a unified interface for hashing strings and converting between
+/// JSON and native types.
 trait DocHash: Copy + Eq + Hash + Debug + Send + Sync + 'static {
     fn hash_string(text: &String) -> Self;
     fn from_json(value: &Value) -> Result<Self, Error>;
     fn to_json(&self) -> Value;
 }
+
+/// 64-bit hash implementation using xxHash3.
+///
+/// Sufficient for datasets up to ~4 billion documents with low collision risk.
+/// JSON representation: numeric value
 impl DocHash for u64 {
     fn hash_string(text: &String) -> Self {
         xxh3_64(text.as_bytes())
@@ -52,6 +88,10 @@ impl DocHash for u64 {
     }
 }
 
+/// 128-bit hash implementation using xxHash3.
+///
+/// Virtually eliminates collision risk for any practical dataset size.
+/// JSON representation: string (since JSON doesn't support 128-bit integers)
 impl DocHash for u128 {
     fn hash_string(text: &String) -> Self {
         xxh3_128(text.as_bytes())
@@ -68,6 +108,67 @@ impl DocHash for u128 {
 =                      MAIN FXN                       =
 =====================================================*/
 
+/// Performs exact deduplication on a directory of JSONL files.
+///
+/// Processes all files in parallel, keeping only the first occurrence of each
+/// unique document. Documents are considered duplicates if they have identical
+/// hash values.
+///
+/// # Arguments
+///
+/// * `input_dir` - Directory containing `.jsonl`, `.jsonl.zst`, `.jsonl.zstd`, or `.jsonl.gz` files
+/// * `output_dir` - Directory where deduplicated files will be written
+/// * `text_key` - JSON key containing document text to hash (e.g., "text", "content")
+/// * `hash_key` - Optional JSON key with pre-computed hash values (skips hashing if provided)
+/// * `hash_bits` - Hash size: 64 or 128 bits
+/// * `annotate` - Optional JSON key for adding duplicate metadata instead of removing
+///
+/// # Hash Key Format
+///
+/// If `hash_key` is provided:
+/// - For 64-bit: Must be a JSON number
+/// - For 128-bit: Must be a JSON string containing a decimal integer
+///
+/// # Annotation Format
+///
+/// When `annotate` is Some, documents receive metadata instead of being removed:
+/// ```json
+/// {
+///   "your_annotation_key": {
+///     "hash": "12345678901234567890",  // The document's hash
+///     "num_dups": 3                     // Total occurrences including this one
+///   }
+/// }
+/// ```
+///
+/// # Returns
+///
+/// `Ok(())` on success, printing statistics:
+/// - Total documents processed
+/// - Documents kept
+/// - Removal rate percentage
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - `hash_bits` is not 64 or 128
+/// - Input directory doesn't exist or contains no valid files
+/// - JSON parsing fails
+/// - File I/O errors occur
+///
+/// # Performance
+///
+/// - **Speed**: Processes millions of documents per minute on modern hardware
+/// - **Memory**: Requires ~24 bytes per unique document (hash + counter) in 64-bit mode,
+///   ~40 bytes in 128-bit mode
+/// - **Parallelism**: Automatically uses all available CPU cores
+///
+/// # Notes
+///
+/// - First occurrence of each document is always kept (or gets `num_dups` in annotation mode)
+/// - Input files are never modified; all output goes to `output_dir`
+/// - Output directory structure mirrors input directory structure
+/// - Progress bar shows file processing status
 pub fn exact_dedup_memory(
     input_dir: &PathBuf,
     output_dir: &PathBuf,
@@ -105,6 +206,10 @@ pub fn exact_dedup_memory(
     Ok(())
 }
 
+/// Internal implementation of exact deduplication, generic over hash type.
+///
+/// This function is called by `exact_dedup_memory` with the appropriate hash type
+/// based on the `hash_bits` parameter.
 fn exact_dedup_impl<K: DocHash>(
     input_dir: &PathBuf,
     output_dir: &PathBuf,
@@ -136,6 +241,10 @@ fn exact_dedup_impl<K: DocHash>(
     Ok((seen_docs.into_inner(), kept_docs.into_inner()))
 }
 
+/// Builds a hash frequency counter by scanning a file.
+///
+/// Used in annotation mode to count total occurrences of each document
+/// before writing output.
 fn build_out_counter<K: DocHash>(
     p: &PathBuf,
     text_key: &String,
@@ -152,6 +261,20 @@ fn build_out_counter<K: DocHash>(
     Ok(())
 }
 
+/// Processes a single file, removing or annotating duplicates.
+///
+/// # Arguments
+///
+/// * `p` - Path to input file
+/// * `output_filename` - Path where output should be written
+/// * `text_key` - JSON key containing document text
+/// * `hash_key` - Optional pre-computed hash field
+/// * `counter` - Thread-safe hash occurrence counter
+/// * `annotate` - Optional annotation key (None = remove duplicates)
+///
+/// # Returns
+///
+/// Tuple of (documents_seen, documents_kept)
 fn exact_dedup_file<K: DocHash>(
     p: PathBuf,
     output_filename: PathBuf,
@@ -163,7 +286,7 @@ fn exact_dedup_file<K: DocHash>(
     let mut seen = 0;
     let mut kept = if let Some(_anno) = annotate {
         counter.len()
-    } else { 
+    } else {
         0
     };
 
@@ -195,11 +318,13 @@ fn exact_dedup_file<K: DocHash>(
         write_mem_to_pathbuf(&output_contents, &output_filename).unwrap()
     }
 
-
-
     Ok((seen, kept))
 }
 
+/// Extracts or computes the hash value for a document.
+///
+/// If `hash_key` is provided, reads the pre-computed hash from that JSON field.
+/// Otherwise, hashes the text content using the appropriate hash function.
 fn get_hash_val<K: DocHash>(
     json_obj: &Value,
     text_key: &String,

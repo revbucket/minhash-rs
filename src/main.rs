@@ -1,3 +1,91 @@
+//! # Document Deduplication CLI
+//!
+//! Command-line interface for exact and fuzzy (MinHash) document deduplication.
+//!
+//! ## Overview
+//!
+//! This tool supports four deduplication strategies:
+//!
+//! | Method | Storage | Best For |
+//! |--------|---------|----------|
+//! | Exact + Memory | In-memory | Small datasets, simple exact matching |
+//! | Exact + Disk | Disk-based | Large datasets, exact matching, distributed |
+//! | MinHash + Memory | In-memory | Small datasets, fuzzy matching |
+//! | MinHash + Disk | Disk-based | Large datasets, fuzzy matching, distributed |
+//!
+//! ## Exact vs. Fuzzy Deduplication
+//!
+//! - **Exact**: Removes documents with identical content (or identical hash keys).
+//!   Fast and deterministic, but misses near-duplicates.
+//!
+//! - **Fuzzy (MinHash)**: Uses locality-sensitive hashing to find near-duplicates
+//!   based on Jaccard similarity. Follows the algorithm from
+//!   [Lee et al. 2021](https://arxiv.org/abs/2107.06499).
+//!
+//! ## Memory vs. Disk
+//!
+//! - **Memory**: Stores intermediate data structures in RAM. Simpler to use,
+//!   no setup required, but limited by available memory.
+//!
+//! - **Disk**: Stores intermediate files on disk. Supports datasets that don't
+//!   fit in memory and enables distributed processing across multiple machines.
+//!
+//! ## Quick Start Examples
+//!
+//! ### Exact Deduplication (Small Dataset)
+//! ```bash
+//! dedup exact-dedup-memory \
+//!   --input-dir /data/docs \
+//!   --output-dir /data/deduped \
+//!   --text-key "content"
+//! ```
+//!
+//! ### Fuzzy Deduplication (Small Dataset)
+//! ```bash
+//! dedup minhash-memory \
+//!   --input-dir /data/docs \
+//!   --storage-dir /tmp/work \
+//!   --output-dir /data/deduped \
+//!   --text-key "text" \
+//!   --num-buckets 20 \
+//!   --bucket-size 5
+//! ```
+//!
+//! ### Fuzzy Deduplication (Large Dataset, Distributed)
+//! ```bash
+//! # Step 1: Build file map (run once)
+//! dedup mh-build-file-map \
+//!   --input-dir /data/docs \
+//!   --storage-dir /shared/work
+//!
+//! # Step 2: Hash documents (run on multiple workers with different path-chunk values)
+//! dedup mh-hash-docs \
+//!   --local-input /data/docs \
+//!   --storage-dir /shared/work \
+//!   --text-key "text" \
+//!   --path-chunk 0 \
+//!   --num-path-chunks 10
+//!
+//! # Step 3: Gather edges (run once, requires all signatures)
+//! dedup mh-gather-edges \
+//!   --storage-dir /shared/work
+//!
+//! # Step 4: Build union-find (run once on single machine)
+//! dedup mh-build-uf \
+//!   --storage-dir /shared/work \
+//!   --num-path-chunks 10
+//!
+//! # Step 5: Clean files (run on multiple workers with different path-chunk values)
+//! dedup mh-clean-files \
+//!   --input-dir /data/docs \
+//!   --storage-dir /shared/work \
+//!   --output-dir /data/deduped \
+//!   --path-chunk 0 \
+//!   --num-path-chunks 10 \
+//!   --remove-duplicates true
+//! ```
+
+
 // External crates
 use clap::{Parser, Subcommand};
 
@@ -92,8 +180,7 @@ Auxiliary phase: For examination purposes, we can look at each connected compone
 ----------------
 Some design notes:
 
-+ Config: Globally, this requires a json config. I'll make an example when
-          I square up exactly what I need here.
++ Config: This can be done without a config, but your 
 
 + Disk space: We rely heavily on storing auxiliary data structures on disk.
               Basically there's a state change after every phase where we make
@@ -137,363 +224,415 @@ struct ArgParser {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    #[clap(arg_required_else_help = true)]
     /*============================================================
     =            Exact Deduplication Methods                     =
     ============================================================*/
 
-    /// Memory-based exact deduplication
+    /// Exact deduplication for small datasets (all-in-memory processing)
+    ///
+    /// Removes documents with identical content in a single pass. All data
+    /// is processed in memory, so this is best for datasets under ~10GB.
+    ///
+    /// EXAMPLE:
+    ///   dedup exact-dedup-memory \
+    ///     --input-dir /data/documents \
+    ///     --output-dir /data/unique \
+    ///     --text-key "content" \
+    ///     --annotate-key "duplicate_info"
+    #[clap(arg_required_else_help = true)]
     ExactDedupMemory {
+        /// Directory containing input JSONL files
         #[arg(required = true, long)]
         input_dir: PathBuf,
 
+        /// Directory where deduplicated files will be written
         #[arg(required = true, long)]
         output_dir: PathBuf,
 
+        /// JSON key containing document text
         #[arg(long, default_value_t=String::from("text"))]
         text_key: String,
 
+        /// Optional: JSON key containing pre-computed document hash
+        /// If not provided, text will be hashed automatically
         #[arg(long)]
-        /// If present, will be the ID used for exact deduplication.
         hash_key: Option<String>,
 
+        /// Number of bits for document hash (if hash_key not provided)
         #[arg(long, default_value_t = 128)]
-        /// If ^ not present, will be the number of bits used for hashing
         hash_bits: usize,
 
+        /// Optional: Add duplicate info to documents instead of removing them
+        /// Can be nested, e.g., "metadata.duplicates"
         #[arg(long)]
-        /// If present, we don't actually delete and just put the
-        /// Can be a nested key, like "metadata.exact_duplicates" => {metadata : {exact_duplicates: {...}}}
         annotate_key: Option<String>,
     },
 
-    /// Disk-based exact deduplication (step 1 of 2)
+    /// Exact deduplication step 1/2: Group documents by hash
+    ///
+    /// First stage of disk-based exact deduplication for large datasets.
+    /// Hashes all documents and groups them into bins for parallel processing.
+    ///
+    /// EXAMPLE:
+    ///   dedup exact-dedup-disk-group \
+    ///     --input-dir /data/documents \
+    ///     --storage-dir /scratch/work \
+    ///     --hash-key "doc_id" \
+    ///     --num-bins 100
+    #[clap(arg_required_else_help = true)]
     ExactDedupDiskGroup {
+        /// Directory containing input JSONL files
         #[arg(required = true, long)]
         input_dir: PathBuf,
 
+        /// Working directory for intermediate files
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
+        /// JSON key containing document text
         #[arg(long, default_value_t=String::from("text"))]
         text_key: String,
 
+        /// JSON key containing document identifier for deduplication
         #[arg(long, required = true)]
-        /// If present, will be the ID used for exact deduplication.
         hash_key: String,
 
+        /// Number of bits for document hash
         #[arg(long, default_value_t = 128)]
-        /// If ^ not present, will be the number of bits used for hashing
         hash_bits: usize,
 
+        /// Number of bins to partition documents into
+        /// More bins = better parallelism but more files
         #[arg(long, required = true)]
-        /// How many bins/groups the docs get hashed into
         num_bins: usize,
     },
 
-    /// Disk-based exact deduplication (step 2 of 2)
+    /// Exact deduplication step 2/2: Remove duplicates from groups
+    ///
+    /// Second stage of disk-based exact deduplication. Processes the grouped
+    /// documents and removes duplicates.
+    ///
+    /// EXAMPLE:
+    ///   dedup exact-dedup-disk-prune \
+    ///     --storage-dir /scratch/work \
+    ///     --output-dir /data/unique \
+    ///     --hash-key "doc_id"
+    #[clap(arg_required_else_help = true)]
     ExactDedupDiskPrune {
+        /// Working directory containing grouped documents
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
+        /// Directory where deduplicated files will be written
         #[arg(required = true, long)]
         output_dir: PathBuf,
 
+        /// JSON key used for deduplication (must match step 1)
         #[arg(required = true, long)]
         hash_key: String,
 
+        /// Optional: Add duplicate info instead of removing
         #[arg(long)]
-        /// If present, we don't actually delete and just put the
-        /// Can be a nested key, like "metadata.exact_duplicates" => {metadata : {exact_duplicates: {...}}}
         annotate_key: Option<String>,
     },
 
     /*============================================================
     =            MinHash Deduplication Methods                   =
     ============================================================*/
+
+    /// MinHash fuzzy deduplication for small datasets (all-in-memory)
+    ///
+    /// Removes near-duplicate documents using MinHash LSH. Runs entire
+    /// pipeline in one command. Best for datasets under ~10GB.
+    ///
+    /// EXAMPLE:
+    ///   dedup minhash-memory \
+    ///     --input-dir /data/documents \
+    ///     --storage-dir /tmp/work \
+    ///     --output-dir /data/deduped \
+    ///     --text-key "content" \
+    ///     --num-buckets 20 \
+    ///     --bucket-size 5 \
+    ///     --remove-duplicates true \
+    ///     --cleanup-storage
+    #[clap(arg_required_else_help = true)]
     MinhashMemory {
+        /// Directory containing input JSONL files
         #[arg(required = true, long)]
         input_dir: PathBuf,
 
+        /// Working directory for intermediate files
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
+        /// Directory where deduplicated files will be written
         #[arg(required = true, long)]
         output_dir: PathBuf,
 
+        /// JSON key containing document text
         #[arg(long, default_value_t=String::from("text"))]
         text_key: String,
 
+        /// Optional: Path to YAML configuration file
         #[arg(long)]
         config: Option<PathBuf>,
 
-        /// Config overrides -- these should be specified in the config
-        #[arg(long)] // Overrides num_buckets for minhash if not specified in config
+        /// Number of LSH bands (more = stricter matching)
+        #[arg(long)]
         num_buckets: Option<usize>,
 
-        #[arg(long)] // Overrides bucket_size for minhash if not specified in config
+        /// Hash values per band (more = stricter matching)
+        #[arg(long)]
         bucket_size: Option<usize>,
 
-        #[arg(long)] // Overrides ngram_size for minhash if not specified in config
+        /// N-gram size for shingling (default: 3 = trigrams)
+        #[arg(long)]
         ngram_size: Option<usize>,
 
-        #[arg(long)] // Overrides permutation_seeds for minhash if not specified in config
+        /// Random seed for reproducibility
+        #[arg(long)]
         permutation_seed: Option<u64>,
 
-        #[arg(long)] // Overrides tokenizer type for minhash if not specified in config
+        /// Tokenizer: "cl100k", "p50k", "uniseg", or character-level (default)
+        #[arg(long)]
         tokenizer: Option<String>,
 
-        #[arg(long)] // Overrides whether we should annotate at the output
+        /// Add duplicate metadata to documents instead of removing
+        #[arg(long)]
         annotate: Option<bool>,
 
-        #[arg(long)] // Overrides what the key
+        /// JSON key for annotations (e.g., "dedup_info")
+        #[arg(long)]
         annotate_key: Option<String>,
 
+        /// Delete input files after processing
         #[arg(long)]
         delete_while_cleaning: Option<bool>,
 
+        /// Remove duplicate documents (keep first occurrence only)
         #[arg(long)]
         remove_duplicates: Option<bool>,
 
+        /// Delete storage directory after completion
         #[arg(long, default_value_t = false)]
         cleanup_storage: bool,
     },
 
+    /// MinHash step 1/5: Build file map
+    ///
+    /// Creates an index mapping file paths to integer IDs. Required before
+    /// any other MinHash steps.
+    ///
+    /// EXAMPLE:
+    ///   dedup mh-build-file-map \
+    ///     --input-dir /data/documents \
+    ///     --storage-dir /shared/work
+    #[clap(arg_required_else_help = true)]
     MhBuildFileMap {
+        /// Directory containing input JSONL files
         #[arg(required = true, long)]
         input_dir: PathBuf,
 
+        /// Working directory where file map will be saved
         #[arg(required = true, long)]
         storage_dir: PathBuf,
     },
 
+    /// MinHash step 2/5: Compute signatures for document chunk
+    ///
+    /// Computes MinHash signatures for a subset of documents. Can be run
+    /// in parallel across multiple machines with different path-chunk values.
+    ///
+    /// EXAMPLE:
+    ///   # Worker 0 processes chunk 0 of 10
+    ///   dedup mh-hash-docs \
+    ///     --local-input /data/documents \
+    ///     --storage-dir /shared/work \
+    ///     --text-key "text" \
+    ///     --path-chunk 0 \
+    ///     --num-path-chunks 10 \
+    ///     --num-buckets 20 \
+    ///     --bucket-size 5
+    #[clap(arg_required_else_help = true)]
     MhHashDocs {
-        #[arg(required=true, long)]
+        /// Directory containing input files to process
+        #[arg(required = true, long)]
         local_input: PathBuf,
 
+        /// Working directory containing file map
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
+        /// JSON key containing document text
         #[arg(long, default_value_t=String::from("text"))]
         text_key: String,
 
+        /// Optional: Path to YAML configuration file
         #[arg(long)]
         config: Option<PathBuf>,
 
+        /// This worker's chunk ID (0 to num-path-chunks - 1)
         #[arg(long, required = true)]
         path_chunk: usize,
 
+        /// Total number of chunks for parallel processing
         #[arg(long, required = true)]
         num_path_chunks: usize,
 
-        /// Config overrides -- these should be specified in the config
-        #[arg(long)] // Overrides num_buckets for minhash if not specified in config
+        /// Number of LSH bands
+        #[arg(long)]
         num_buckets: Option<usize>,
 
-        #[arg(long)] // Overrides bucket_size for minhash if not specified in config
+        /// Hash values per band
+        #[arg(long)]
         bucket_size: Option<usize>,
 
-        #[arg(long)] // Overrides ngram_size for minhash if not specified in config
+        /// N-gram size for shingling
+        #[arg(long)]
         ngram_size: Option<usize>,
 
-        #[arg(long)] // Overrides permutation_seeds for minhash if not specified in config
+        /// Random seed for reproducibility
+        #[arg(long)]
         permutation_seed: Option<u64>,
 
-        #[arg(long)] // Overrides tokenizer type for minhash if not specified in config
+        /// Tokenizer type
+        #[arg(long)]
         tokenizer: Option<String>,
 
+        /// Expected total number of documents (affects signature encoding)
         #[arg(long)]
         num_docs: Option<usize>,
 
+        /// Maximum lines per file (affects line number encoding)
         #[arg(long)]
         max_lines_per_path: Option<usize>,
 
+        /// Number of signature chunks for distribution
         #[arg(long)]
         num_sig_chunks: Option<usize>,
     },
 
+    /// MinHash step 3/5: Gather edges from matching signatures
+    ///
+    /// Groups documents with identical signatures into duplicate candidates.
+    /// All signature files must be present before running this step.
+    ///
+    /// EXAMPLE:
+    ///   dedup mh-gather-edges \
+    ///     --storage-dir /shared/work
+    #[clap(arg_required_else_help = true)]
     MhGatherEdges {
+        /// Working directory containing signature files
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
+        /// Optional: Path to YAML configuration file
         #[arg(long)]
         config: Option<PathBuf>,
 
+        /// Expected total number of documents
         #[arg(long)]
         num_docs: Option<usize>,
 
+        /// Maximum lines per file
         #[arg(long)]
         max_lines_per_path: Option<usize>,
     },
 
+    /// MinHash step 4/5: Build Union-Find structure
+    ///
+    /// Identifies connected components of duplicates using Union-Find.
+    /// WARNING: Must run on a single machine with access to all edge files.
+    /// Cannot be parallelized across machines.
+    ///
+    /// EXAMPLE:
+    ///   dedup mh-build-uf \
+    ///     --storage-dir /shared/work \
+    ///     --num-path-chunks 10
+    #[clap(arg_required_else_help = true)]
     MhBuildUf {
+        /// Working directory containing edge files
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
+        /// Optional: Path to YAML configuration file
         #[arg(long)]
         config: Option<PathBuf>,
 
+        /// Number of chunks for cleaning metadata (should match step 5)
         #[arg(long, required = true)]
         num_path_chunks: usize,
 
+        /// Maximum lines per file
         #[arg(long)]
         max_lines_per_path: Option<usize>,
     },
 
+    /// MinHash step 5/5: Clean files using deduplication metadata
+    ///
+    /// Applies deduplication by removing or annotating duplicates. Can be run
+    /// in parallel across multiple machines with different path-chunk values.
+    ///
+    /// EXAMPLE:
+    ///   # Worker 0 processes chunk 0 of 10
+    ///   dedup mh-clean-files \
+    ///     --input-dir /data/documents \
+    ///     --storage-dir /shared/work \
+    ///     --output-dir /data/deduped \
+    ///     --path-chunk 0 \
+    ///     --num-path-chunks 10 \
+    ///     --remove-duplicates true \
+    ///     --annotate true \
+    ///     --annotate-key "dedup_info"
+    #[clap(arg_required_else_help = true)]
     MhCleanFiles {
+        /// Directory containing original input files
         #[arg(required = true, long)]
         input_dir: PathBuf,
 
+        /// Working directory containing cleaning metadata
         #[arg(required = true, long)]
         storage_dir: PathBuf,
 
+        /// Directory where cleaned files will be written
         #[arg(required = true, long)]
         output_dir: PathBuf,
 
+        /// This worker's chunk ID (0 to num-path-chunks - 1)
         #[arg(required = true, long)]
         path_chunk: usize,
 
+        /// Total number of chunks (must match step 4)
         #[arg(required = true, long)]
         num_path_chunks: usize,
 
+        /// Optional: Path to YAML configuration file
         #[arg(long)]
         config: Option<PathBuf>,
 
-        #[arg(long)] // Overrides whether we should annotate at the output
+        /// Add duplicate metadata to documents
+        #[arg(long)]
         annotate: Option<bool>,
 
-        #[arg(long)] // Overrides what the key
+        /// JSON key for annotations
+        #[arg(long)]
         annotate_key: Option<String>,
 
+        /// Delete input files after processing
         #[arg(long)]
         delete_while_cleaning: Option<bool>,
 
+        /// Remove duplicate documents
         #[arg(long)]
         remove_duplicates: Option<bool>,
 
+        /// Delete storage directory after completion
+        /// WARNING: Only set true on final worker to avoid race conditions
         #[arg(long, default_value_t = false)]
         cleanup_storage: bool,
     },
 }
 
-/*=================================================================
-=                      PHASE 2: HASH THE PATHS                    =
-=================================================================*/
-/* MULTINODE PARALLELISM ON PATH CHUNKS:
-
-    This creates the signature files. The signature files are named like:
-    working_dir/
-    └── signatures/
-       └── band_XXX/
-           └── sigchunk_YYY/
-               └── pathchunk_ZZZ.sig.bin
-
-    Where the:
-    - band_id (XXX) ranges from 0..num_bands (specified in the main config)
-    - sigchunk_id (YYY) ranges from 0..num_sigchunks (specified in the main config)
-    - pathchunk (ZZZ) ranges from 0..num_path_chunks (in the args of this function)
-
-
-    And the contents of each file is a packing of bits of chunk size dependent on the number
-    of paths/maximum_line_size we have. But generally each file contains encoded-then-concatenated
-    triples of the form
-        `(signature, path_id, line_num)`
-    where the exact size of each component can differ based on configs
-*/
-
-/*=================================================================
-=                      PHASE 3: GATHER EDGES                      =
-=================================================================*/
-/* MULTINODE PARALLELISM ON BAND_ID
-    This creates the edge and singleton files.
-
-
-    ----- edge files -----
-    Edge file naming structure:
-    working_dir/
-    └── edges/
-       └── sigchunk_YYY/
-           └── band_XXX.edges.bin
-
-    Where the:
-        - band_id (XXX) ranges from 0..num_bands (pulled from signatures files)
-        - sigchunk_id (YYY) ranges from 0..num_sigchunks (pulled from signatures files)
-
-    And the contents of each file is a packed-bytes object, where if
-    (path_A, line_1) and (path_B, line_2) have the same signature in a single band, then the bytes
-
-        `(path_A, line_1, path_B, line_2)`
-
-    appear in the file.
-
-
-    ----- singleton file ----
-    Singleton file naming structure:
-    working_dir/
-    └── edges/
-       └── singletons.bin
-
-    Where the contents just contain the number of lines per path, encoded as u64's like
-
-        `(path_id, num_lines)`
-
-*/
-
-/*=================================================================
-=                      PHASE 4: Build Union Find                  =
-=================================================================*/
-/* NO MULTINODE PARALLELISM! =(
-This creates a union find structure to merge together the edges.
-It creates the connected-components files and the kill files
-
-    ----- cc files -----
-    working_dir/
-    └── ccs/
-       └── chunk_ZZZ.cc.bin
-
-    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewed as a single
-    array are elements of the form
-
-        `(path_id, line_num)`
-
-    saved as u64's, where there's a special token which is the u64::MAX repeated twice, indicating
-    the end of a connected component
-
-
-    ------ kill files ----
-    working_dir/
-    └── kill/
-       └── chunk_ZZZ.kill.bin
-
-    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewed as a single
-    array are is a concatenation of subarrays like
-
-        `[path_id, kill_line_1, kill_line_2, ..., kill_line_N, terminus]`
-
-    where each are u64s and terminus is u64::MAX
-
-    ----- annotate helpers -----
-    working_dir/
-    └── annotate/
-       └── chunk_ZZZ.annotate.bin
-
-    where the chunk (ZZZ) ranges from 0..num_path_chunks and has contents, that when viewd as a single
-    array are is a concatenation of subarrays like
-
-
-*/
-
-/*=================================================================
-=                      PHASE 5a: CLEAN DUPLICATES                 =
-=================================================================*/
-/* MULTINODE PARALLELISM ON PATHS
-    This cleans the duplicates out from the data.
-    It simply requires the outputs of the previous steps (namely the FileMap in step 1, and the
-    .kill.bin files in step 4).
-
-    It will copy over (deduplicated) files from the input_dir to the output_dir (as specified by the config)
-
-*/
 
 /*=================================================================
 =                                 MAIN                            =

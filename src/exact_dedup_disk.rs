@@ -1,3 +1,55 @@
+//! # Disk-Based Exact Deduplication
+//!
+//! Multi-node parallelizable exact deduplication for datasets too large to fit in memory.
+//!
+//! ## Overview
+//!
+//! This module implements a two-phase approach to exact deduplication that enables
+//! distributed processing across multiple machines:
+//!
+//! ### Phase 1: Group (Partitioning)
+//! Documents are hashed and organized into bins based on their hash values. Each
+//! bin is written to disk as a separate file. This allows the dataset to be
+//! partitioned across machines.
+//!
+//! ### Phase 2: Prune (Deduplication)
+//! Each bin is loaded into memory independently and deduplicated. Since documents
+//! with the same hash always end up in the same bin, we guarantee that all duplicates
+//! are found.
+//!
+//! ## Distributed Processing Strategy
+//!
+//! ```text
+//! Initial State (Documents organized by file):
+//! ┌─────────────────┬───────┬───────┬───────┬───────┬───────┐
+//! │ Files \ Hashes  │ doc1  │ doc2  │ doc3  │ doc4  │ doc5  │
+//! ├─────────────────┼───────┼───────┼───────┼───────┼───────┤
+//! │ path1.jsonl.zst │   X   │       │   X   │       │       │
+//! │ path2.jsonl.zst │       │   X   │       │   X   │       │
+//! │ path3.jsonl.zst │   X   │       │       │       │   X   │
+//! └─────────────────┴───────┴───────┴───────┴───────┴───────┘
+//!
+//! After Phase 1 (Documents organized by hash bin):
+//! ┌──────────────┬─────────────────────────┐
+//! │ Bin 0        │ All docs with hash % n = 0 │
+//! │ Bin 1        │ All docs with hash % n = 1 │
+//! │ Bin 2        │ All docs with hash % n = 2 │
+//! │ ...          │ ...                        │
+//! └──────────────┴─────────────────────────┘
+//! ```
+//!
+//! ## Workflow
+//!
+//! 1. **Phase 1**: Run `exact_dedup_disk_group` on each machine with local data
+//! 2. **Shuffle**: Redistribute bins so all chunks of bin N are on the same machine
+//! 3. **Phase 2**: Run `exact_dedup_disk_prune` on each machine to deduplicate its bins
+//!
+//! ## Choosing Number of Bins
+//!
+//! - More bins = better load balancing but more files
+//! - Recommended: 100-1000 bins depending on dataset size
+//! - Each bin should fit comfortably in memory during Phase 2
+
 use crate::storage::GenWriter;
 use crate::utils::{json_get, json_set};
 use anyhow::{anyhow, Error, Result};
@@ -17,45 +69,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64};
-/*
-Disk-based multi-node parallelizable exact deduplication in rust. This should only be used
-in the case that the size of the dataset is too large to fit on a single node.
 
-This operates in two phases:
-
-Phase 1 (group):
-- Reads and annotates documents with their hash signatures (if not already present)
-- Then reorganizes documents into "bins" on disk based on their hash signatures
-
-Phase 2:
-- Loops over each bin and loads it fully into memory.
-- Keeps exactly one copy of each document with a given hash signature in that bin.
-
-
-
-The current organization of docs can be thought of like:
-+---------------------+-------+-------+-------+-------+-------+
-| Paths \ Hash Sigs   | doc1  | doc2  | doc3  | doc4  | doc5  |
-+---------------------+-------+-------+-------+-------+-------+
-| path1.jsonl.zst     |       |       |       |       |       |
-+---------------------+-------+-------+-------+-------+-------+
-| path2.jsonl.zst     |       |       |       |       |       |
-+---------------------+-------+-------+-------+-------+-------+
-| path3.jsonl.zst     |       |       |       |       |       |
-+---------------------+-------+-------+-------+-------+-------+
-| path4.jsonl.zst     |       |       |       |       |       |
-+---------------------+-------+-------+-------+-------+-------+
-| path5.jsonl.zst     |       |       |       |       |       |
-+---------------------+-------+-------+-------+-------+-------+
-
-Where paths may be split across various nodes.
-The idea is that on each node containing data, we break docs into bins based on their hash signature (step 1)
-Then we shuffle bins around so that all bins corresponding to hashes starting with 0x1234 (e.g.) live on the same node
-Then we apply step 2 to all nodes
-
-## Usage
-
-*/
 
 /*======================================================================
 =                            GROUP METHODS                             =
@@ -63,6 +77,83 @@ Then we apply step 2 to all nodes
 
 const MAX_SIZE: usize = 256_000_000;
 
+/// **Phase 1**: Groups documents into bins based on hash values.
+///
+/// Reads all documents in `input_dir`, computes or reads their hash values,
+/// and writes them to bin files in `storage_dir`. Documents with the same
+/// hash always go to the same bin, enabling distributed deduplication.
+///
+/// # Arguments
+///
+/// * `input_dir` - Directory containing input JSONL files
+/// * `storage_dir` - Working directory where bin files will be written
+/// * `text_key` - JSON key containing document text (used if hash not present)
+/// * `hash_key` - JSON key for hash values (will be added if not present)
+/// * `hash_bits` - Hash size: 64 or 128 bits
+/// * `num_bins` - Number of bins to partition documents into
+///
+/// # Output Structure
+///
+/// Creates files in `storage_dir`:
+/// ```text
+/// storage_dir/
+/// └── chunk_00000000.{run_id}.jsonl.zst
+/// └── chunk_00000001.{run_id}.jsonl.zst
+/// └── ...
+/// └── chunk_{num_bins-1}.{run_id}.jsonl.zst
+/// ```
+///
+/// Where `run_id` is a unique identifier based on input files and random salt.
+/// Files may be split if they exceed MAX_SIZE (256MB).
+///
+/// # Hash Key Behavior
+///
+/// - If document already has `hash_key` field: Uses existing value
+/// - If `hash_key` missing: Computes hash from `text_key` and adds it to document
+///
+/// Format:
+/// - 64-bit: JSON number
+/// - 128-bit: JSON string (decimal)
+///
+/// # Parallelism
+///
+/// Multiple workers can run this function concurrently on different machines,
+/// each processing their local portion of the dataset. All workers should use
+/// the same `num_bins` value.
+///
+/// # Example
+///
+/// ```no_run
+/// // Worker 1 processes /data/shard1
+/// exact_dedup_disk_group(
+///     &PathBuf::from("/data/shard1"),
+///     &PathBuf::from("/scratch/bins"),
+///     &"text".to_string(),
+///     &"doc_hash".to_string(),
+///     64,
+///     100  // 100 bins
+/// )?;
+///
+/// // Worker 2 processes /data/shard2 (same num_bins!)
+/// exact_dedup_disk_group(
+///     &PathBuf::from("/data/shard2"),
+///     &PathBuf::from("/scratch/bins"),
+///     &"text".to_string(),
+///     &"doc_hash".to_string(),
+///     64,
+///     100  // Must match!
+/// )?;
+/// ```
+///
+/// # Returns
+///
+/// `Ok(())` on success, printing the number of documents processed.
+///
+/// # Notes
+///
+/// - All documents with the same hash go to the same bin number
+/// - Bin assignment: `bin = hash % num_bins`
+/// - After this phase, shuffle bins so all parts of each bin live on one machine
 pub fn exact_dedup_disk_group(
     input_dir: &PathBuf,
     storage_dir: &PathBuf,
@@ -113,6 +204,14 @@ pub fn exact_dedup_disk_group(
     Ok(())
 }
 
+
+/// Processes a single file, assigning each document to a bin.
+///
+/// For each document:
+/// 1. Read or compute hash value
+/// 2. Add hash to document if not present
+/// 3. Determine bin number: `hash % num_bins`
+/// 4. Write to appropriate bin file
 pub fn group_docs(
     p: &PathBuf,
     text_key: &String,
@@ -168,7 +267,7 @@ pub fn group_docs(
             };
             bin_number
         };
-        line = serde_json::to_vec(&json_line).unwrap();        
+        line = serde_json::to_vec(&json_line).unwrap();
         line.push(b'\n');
         gen_writer.write_line(0, line, Some(bin_number)).unwrap();
 
@@ -182,6 +281,74 @@ pub fn group_docs(
 =                            PRUNE METHODS                             =
 ======================================================================*/
 
+/// **Phase 2**: Deduplicates documents within each bin.
+///
+/// Reads all bin files from `storage_dir` (created by Phase 1), groups them
+/// by bin number, and deduplicates each group. Since all documents with the
+/// same hash are in the same bin, this guarantees complete deduplication.
+///
+/// # Arguments
+///
+/// * `storage_dir` - Directory containing bin files from Phase 1
+/// * `output_dir` - Directory where deduplicated files will be written
+/// * `hash_key` - JSON key containing hash values (must match Phase 1)
+/// * `annotate_key` - Optional key for adding duplicate metadata instead of removing
+///
+/// # Input Files
+///
+/// Expects files matching pattern: `chunk_{bin_number}.*.jsonl.zst`
+///
+/// All files with the same bin number are processed together as one group.
+/// This allows Phase 1 to split large bins across multiple files.
+///
+/// # Annotation Format
+///
+/// When `annotate_key` is Some:
+/// ```json
+/// {
+///   "your_annotation_key": {
+///     "hash": "12345678901234567890",
+///     "num_dups": 3
+///   }
+/// }
+/// ```
+///
+/// # Parallelism
+///
+/// Groups (bins) are processed in parallel, but all files within a group
+/// must be accessible from the same machine.
+///
+/// # Example
+///
+/// ```no_run
+/// // After shuffling bins from multiple workers in Phase 1
+/// exact_dedup_disk_prune(
+///     &PathBuf::from("/scratch/bins"),
+///     &PathBuf::from("/data/deduplicated"),
+///     &"doc_hash".to_string(),
+///     &None  // Remove duplicates
+/// )?;
+///
+/// // Or with annotation
+/// exact_dedup_disk_prune(
+///     &PathBuf::from("/scratch/bins"),
+///     &PathBuf::from("/data/annotated"),
+///     &"doc_hash".to_string(),
+///     &Some("duplicate_info".to_string())
+/// )?;
+/// ```
+///
+/// # Returns
+///
+/// `Ok(())` on success, printing statistics:
+/// - Total documents processed
+/// - Documents kept (unique documents)
+/// - Removal rate percentage
+///
+/// # Memory Requirements
+///
+/// Each bin must fit in memory during processing. If Phase 1 created bins
+/// that are too large, increase `num_bins` and rerun.
 pub fn exact_dedup_disk_prune(
     storage_dir: &PathBuf,
     output_dir: &PathBuf,
@@ -232,6 +399,22 @@ pub fn exact_dedup_disk_prune(
     Ok(())
 }
 
+/// Deduplicates a single bin (group of files with same bin number).
+///
+/// Loads all files in the group into memory, deduplicates based on hash values,
+/// and writes output. Since all documents with the same hash are guaranteed to
+/// be in this bin, we find all duplicates.
+///
+/// # Algorithm
+///
+/// 1. If annotating: Pre-count occurrences of each hash
+/// 2. Process files, keeping first occurrence of each hash
+/// 3. If annotating: Add metadata to all documents
+/// 4. Write output files
+///
+/// # Returns
+///
+/// Tuple of (documents_seen, documents_kept)
 fn prune_group(
     vlist: &Vec<PathBuf>,
     storage_dir: &PathBuf,

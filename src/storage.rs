@@ -745,14 +745,18 @@ impl GenWriter {
         }
     }
 
-    pub fn write_line(&self, key: usize, contents: Vec<u8>, force_key: Option<usize>) -> Result<(), Error> {
+    pub fn write_line(
+        &self,
+        key: usize,
+        contents: Vec<u8>,
+        force_key: Option<usize>,
+    ) -> Result<(), Error> {
         // hash the key and take mod num_chunks to get location
         let chunk_id = force_key.unwrap_or_else(|| {
             let mut hasher = DefaultHasher::new();
             key.hash(&mut hasher);
-            hasher.finish() as usize % self.num_chunks                
+            hasher.finish() as usize % self.num_chunks
         });
-
 
         let writer_arc = self.writer.get(&chunk_id).unwrap().clone();
         let mut cc_writer = writer_arc.lock().unwrap();
