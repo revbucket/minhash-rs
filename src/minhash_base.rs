@@ -19,12 +19,13 @@
 //! - **Union-Find**: Must run globally (no multi-node parallelism)
 //! - **Cleaning**: Parallel across file path chunks
 
+use std::hash::BuildHasher;
+use ahash::RandomState;
 use crate::minhash_config::Config;
 use crate::storage::GenWriter;
 use crate::storage::{compute_sig_size, to_byte_size, IntValueEnum, SignatureWriter};
 use crate::uf_rush2::{parent as uf_parent, UFRush};
 use crate::utils::json_set;
-use ahash::RandomState;
 use anyhow::{Error, Result};
 use dashmap::DashMap;
 use glob::glob;
@@ -282,7 +283,6 @@ pub fn hash_only(
             .unwrap(),
         config_obj.minhash_params.num_buckets,
     );
-
     // -- Get files to hash
 
     let local_input = if let Some(local_input) = local_input {
@@ -394,7 +394,6 @@ fn process_path(
         .iter()
         .flat_map(|seed| _expand_rng(*seed, band_size))
         .collect();
-
     let path_id = IntValueEnum::new(path_id, path_size);
 
     let mut docs_hashed = 0;
@@ -423,7 +422,6 @@ fn process_path(
             continue;
         };
         let hash_vals = get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size);
-
         docs_hashed += 1;
 
         let bands = hash_vals.into_shape((num_bands, band_size)).unwrap();
@@ -490,7 +488,6 @@ pub fn get_hash_vals_from_tokens(
 ) -> Array1<u64> {
     let a = _init_permutations(perm_seeds);
     let n = perm_seeds.len();
-
     let mut hash_vals = Array1::ones(n) * u64::MAX;
     let mut ngram: VecDeque<usize> = VecDeque::with_capacity(ngram_size);
     let mut ngram_count = 0;
@@ -541,10 +538,15 @@ fn _update_hash_vals(
     ngram: &VecDeque<usize>,
 ) -> Array1<u64> {
     // hash the vecdeque as a u128
-    let hash_a = RandomState::with_seed(123);
-    let hash_b = RandomState::with_seed(456);
-    let hash_val_a = hash_a.hash_one(ngram);
-    let hash_val_b = hash_b.hash_one(ngram);
+    let builder_a = RandomState::with_seeds(123, 456, 789, 101112);
+    let mut hasher_a = builder_a.build_hasher();
+    ngram.hash(&mut hasher_a);
+    let hash_val_a = hasher_a.finish();
+    
+    let builder_b = RandomState::with_seeds(131415, 161718, 192021, 222324);
+    let mut hasher_b = builder_b.build_hasher();
+    ngram.hash(&mut hasher_b);
+    let hash_val_b = hasher_b.finish();
     let cur_hash = ((hash_val_a as u128) << 64) | (hash_val_b as u128);
 
     // then multiply by a (mod 2^128) and take top 64 most significant bits
@@ -1142,7 +1144,6 @@ pub fn clean_files(
         .into_par_iter()
         .filter(|(path, _path_id)| input_dir.join(path).exists())
         .collect();
-
     // Parse the metadata into a map from path_id -> [(line_num, cc_id, cc_size, cc_idx),...]
     println!("Reading metadata file from disk...");
     let start_clean_read = Instant::now();
@@ -1152,7 +1153,7 @@ pub fn clean_files(
         "Parsed metadata file in {:?} seconds",
         start_clean_read.elapsed().as_secs()
     );
-
+    
     println!("Scrubbing files...");
     let start_clean = Instant::now();
     let documents_removed = AtomicUsize::new(0);
@@ -1191,8 +1192,8 @@ pub fn clean_files(
         "Processed all files in {:?} secs",
         start_main.elapsed().as_secs()
     );
-    println!("Saw {:?} files", documents_seen);
-    println!("Removed {:?} files", documents_removed);
+    println!("Saw {:?} docs", documents_seen);
+    println!("Removed {:?} docs", documents_removed);
     println!(
         "Removal rate would be {:?}%",
         100.0 * documents_removed as f32 / (documents_seen as f32)
@@ -1239,13 +1240,14 @@ fn clean_path(
         if anno_lookup.contains_key(&line_num) {
             // Need to either annotate and write or just remove
             let (cc_id, cc_size, cc_idx) = *anno_lookup.get(&line_num).unwrap();
+            if cc_idx > 0 {
+                lines_removed += 1;
+            }            
             // Remove if not the first idx
             if cc_idx > 0 && do_remove {
                 continue;
             }
-            if cc_idx > 0 {
-                lines_removed += 1;
-            }
+
             if annotate {
                 // If we want to annotate, go ahead and do that
                 let mut line_json: JSONValue = serde_json::from_str(&line).unwrap();

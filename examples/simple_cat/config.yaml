@@ -1,0 +1,16 @@
+band_size: 8
+content_key: text
+local_input: /Users/mattj/work/minhash-rs/examples/simple_cat/input
+local_output: /Users/mattj/work/minhash-rs/examples/simple_cat/output
+max_lines_per_path: 100
+name: simple-cat-example
+ngram_size: 5
+num_bands: 14
+num_docs: 1000
+num_sig_chunks: 2
+tokenizer_str: p50k
+working_dir: /Users/mattj/work/minhash-rs/examples/simple_cat/working
+remote_input: xxx
+concat_key:
+  - repo
+  - pl

@@ -1,0 +1,16 @@
+band_size: 8
+content_key: text
+local_input: /Users/mattj/work/minhash-rs/examples/simple1/input
+output_dir: /Users/mattj/work/minhash-rs/examples/simple1/output
+max_lines_per_path: 100
+name: simple-exact-dedup
+ngram_size: 5
+num_bands: 14
+num_docs: 1000
+num_sig_chunks: 2
+remote_input: s3://allennlp-mattj/scratch/minhash_example1/inputs
+remote_output: s3://allennlp-mattj/scratch/minhash_example1/outputs
+remote_working_dir: s3://allennlp-mattj/scratch/minhash_example1/working_rs
+tokenizer_str: uniseg
+working_dir: /Users/mattj/work/minhash-rs/examples/simple1/working_rs
+annotate_only: true

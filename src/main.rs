@@ -293,7 +293,7 @@ enum Commands {
         #[arg(long, default_value_t=String::from("text"))]
         text_key: String,
 
-        /// JSON key containing document identifier for deduplication
+        /// JSON key where the hash of the data will live
         #[arg(long, required = true)]
         hash_key: String,
 

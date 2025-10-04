@@ -11,6 +11,7 @@ from collections import defaultdict
 
 import yaml
 from smart_open import open
+from tqdm.auto import tqdm
 
 # =====================================================
 # =                  CONFIG PARSEY STUFF              =
@@ -43,7 +44,10 @@ def read_intX(bytestring):
 
 def get_sizes(storage_dir, config):
     # Assumes that the values in the config are the true ones (and have not been overridden)
-    config_data = yaml.safe_load(open(config, "r"))
+    try:
+        config_data = yaml.safe_load(open(config, "r"))
+    except:
+        config_data = {}
 
     max_lines_per_path = config_data.get("eng_params", {}).get(
         "max_lines_per_path", 1_000_000_000
@@ -65,14 +69,14 @@ def get_sizes(storage_dir, config):
 # =====================================================
 
 
-def read_all_sig_files(sig_dir, storage_dir, config):
+def read_all_sig_files(storage_dir, config):
     # Returns a list of (band_id, path_id, line_num, signature)
-
+    sig_dir = os.path.join(storage_dir, "sig_storage")
     files = glob.glob(os.path.join(sig_dir, "**/*.sig.bin"), recursive=True)
     all_data = []
-    for f in files:
+    for f in tqdm(files):
         band_id = os.path.basename(os.path.dirname(os.path.dirname(f))).split("_")[-1]
-        for tup in read_signature_file(f, config):
+        for tup in read_signature_file(f, storage_dir, config):
             all_data.append((band_id,) + tup)
     return all_data
 
@@ -81,7 +85,7 @@ def read_signature_file(sig_file, storage_dir, config):
     # Returns a list of (path_id, line_num, signature)
     data = open(sig_file, "rb").read()
 
-    path_size, line_size, sig_size = get_sizes(config)
+    path_size, line_size, sig_size = get_sizes(storage_dir, config)
     output = []
     for i in range(0, len(data), path_size + line_size + sig_size):
         chunk = data[i : i + path_size + line_size + sig_size]
@@ -97,8 +101,17 @@ def read_signature_file(sig_file, storage_dir, config):
 # =====================================================
 
 
+def read_all_edge_files(storage_dir, config):
+    edge_dir = os.path.join(storage_dir, "edges")
+    files = glob.glob(os.path.join(edge_dir, "**/*.edges.bin"), recursive=True)
+    all_data = []
+    for f in tqdm(files):
+        all_data.extend(read_edge_file(f, storage_dir, config))
+    return all_data
+
+
 def read_edge_file(edge_file, storage_dir, config):
-    path_size, line_size, _ = get_sizes(config)
+    path_size, line_size, _ = get_sizes(storage_dir, config)
     data = open(edge_file, "rb").read()
 
     pairlen = path_size + line_size
@@ -146,7 +159,7 @@ def read_clean_file(clean_file):
         cc_id = read_intX(
             entry[path_size + line_size : path_size + line_size + cc_id_size]
         )
-        cc_size = read_intX(
+        cc_mag = read_intX(
             entry[
                 path_size
                 + line_size
@@ -157,7 +170,7 @@ def read_clean_file(clean_file):
             ]
         )
         cc_idx = read_intX(entry[-cc_size:])
-        return (path_num, line_num, cc_id, cc_size, cc_idx)
+        return (path_num, line_num, cc_id, cc_mag, cc_idx)
 
     return [parse_entry(entry) for entry in entries]
 

@@ -1,0 +1,16 @@
+# Minhash Configuration file
+minhash_params:
+  num_buckets: 26
+  bucket_size: 11
+  ngram_size: 5
+  permutation_seed: 42
+  tokenizer: "cl100k_base"
+eng_params:
+  num_docs: 24000000000 # Supposed to be 23.6B documents
+  max_lines_per_path: 1048576 # Depends on how you made the jsonl.zst's
+  num_sig_chunks: 2048
+output_params:
+  annotate: true
+  annotate_key: metadata.minhash # minhash output data location
+  delete_while_cleaning: true # does housekeeping during final step
+  remove_duplicates: false # just annotate, don't remove

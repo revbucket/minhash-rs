@@ -1,0 +1,15 @@
+name: dclm_rw_8
+num_bands: 14
+band_size: 8
+ngram_size: 5
+tokenizer_str: p50k
+num_sig_chunks: 128
+num_docs: 580000000
+max_lines_per_path: 1000000
+content_key: text
+local_input: /mnt/raid0/dclm_8
+working_dir: /mnt/raid0/working
+output_dir: /mnt/raid0/dclm_8_output
+remote_input: s3://ai2-llm/pretraining-data/sources/learn2code/love2code-baseline-filtered-20250218_004/
+remote_working_dir: null
+remote_output: null

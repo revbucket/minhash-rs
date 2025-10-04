@@ -157,7 +157,7 @@ pub fn minhash_memory(
         eng_params: EngOverrides {
             num_docs: None,
             max_lines_per_path: None,
-            num_sig_chunks: None,
+            num_sig_chunks: Some(32),
         },
         output_params: OutputOverrides {
             annotate: annotate,
@@ -170,6 +170,7 @@ pub fn minhash_memory(
 
     // Build the file map to get path_ids
     let file_map = FileMap::new(input_dir, &None).unwrap();
+    file_map.save(&storage_dir.clone().join("filemap.json.gz")).unwrap();
 
     // Then create the hashes of all documents and store them in storage_dir
     hash_only(
@@ -186,7 +187,7 @@ pub fn minhash_memory(
 
     // And then group into edges and build the union find
     gather_edges(&config_obj, &file_map, storage_dir).unwrap();
-    build_uf(&config_obj, &file_map, storage_dir, 0).unwrap();
+    build_uf(&config_obj, &file_map, storage_dir, 1).unwrap();
 
     // Finally handle the cleaning of data
     clean_files(

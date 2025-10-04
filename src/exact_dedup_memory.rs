@@ -238,7 +238,9 @@ fn exact_dedup_impl<K: DocHash>(
         kept_docs.fetch_add(p_kept, Ordering::Relaxed);
         pbar.inc(1);
     });
-    Ok((seen_docs.into_inner(), kept_docs.into_inner()))
+
+    let kept_docs = if let Some(_annokey) = annotate {counter.len()} else {kept_docs.into_inner()};
+    Ok((seen_docs.into_inner(), kept_docs))
 }
 
 /// Builds a hash frequency counter by scanning a file.
@@ -285,7 +287,7 @@ fn exact_dedup_file<K: DocHash>(
 ) -> Result<(usize, usize), Error> {
     let mut seen = 0;
     let mut kept = if let Some(_anno) = annotate {
-        counter.len()
+        0 // counter.len()
     } else {
         0
     };
