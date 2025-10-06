@@ -21,8 +21,8 @@ minhash_params:
   permutation_seed: 42
   tokenizer: "cl100k_base"
 eng_params:
-  num_docs: 100000 
-  max_lines_per_path: 128 
+  num_docs: 1000000
+  max_lines_per_path: 100000
   num_sig_chunks: 8
 output_params:
   annotate: false
@@ -51,7 +51,10 @@ for i in {0..3}; do
 	cargo run --release -- mh-hash-docs \
 		--local-input test_data_inputs/fuzzy_multi \
 		--storage-dir test_data_outputs/s3_storage \
-		--config test_data_outputs/s3_storage/config.yaml \
+		--num-buckets 26 \
+		--bucket-size 11 \
+		--ngram-size 5 \
+		--permutation-seed 42 \
 		--path-chunk $i \
 		--num-path-chunks 4
 done
@@ -71,8 +74,7 @@ for band in test_data_outputs/s3_storage/sig_storage/*; do
 	cp test_data_outputs/s3_storage/filemap.json.gz test_data_outputs/local_storage
 	cp -r $band test_data_outputs/local_storage/sig_storage/
 	cargo run --release -- mh-gather-edges \
-		--storage-dir test_data_outputs/local_storage/ \
-		--config test_data_outputs/s3_storage/config.yaml
+		--storage-dir test_data_outputs/local_storage/ 
 	cp -r test_data_outputs/local_storage/edges/* test_data_outputs/s3_storage/edges/
 	rm -rf test_data_outputs/local_storage
 done
@@ -86,7 +88,6 @@ Then we have to run the one global step where we merge all the edges together to
 
 cargo run --release -- mh-build-uf \
 	--storage-dir test_data_outputs/s3_storage \
-	--config test_data_outputs/s3_storage/config.yaml \
 	--num-path-chunks 4
 ```
 
@@ -107,10 +108,19 @@ for i in {0..3}; do
 	--output-dir test_data_outputs/fuzzy_multi \
 	--path-chunk $i \
 	--num-path-chunks 4 \
-	--config test_data_outputs/s3_storage/config.yaml
+	--annotate false --remove-duplicates true
 	rm -rf test_data_outputs/local_storage
 done
 
+```
+
+## Step 8: Verify the outputs 
+You can manually inspect the output data with snippets like: 
+``` #! python
+import glob, json
+all_data = [json.loads(_) for f in glob.glob('test_data_outputs/fuzzy_multi/*.jsonl') for _ in open(f).read().splitlines()]
+assert len(all_data) == 25 # check only 25 surviving docs
+assert set(_['text'].split(' ')[-1] for _ in all_data) == set('LOREM_%02d' % i for i in range(25)) # Check the content of the surviving docs
 ```
 
 
