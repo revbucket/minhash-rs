@@ -55,7 +55,7 @@ def make_fuzzy_example_docs(target_dir, multi=False):
 
     # Make 25 different lorem ipsum style docs
     lorem_docs = {
-        i: " ".join(lorem.paragraph() for _ in range(3)) + " LOREM_%02d" % i
+        i: " ".join(lorem.paragraph() for _ in range(10)) + " LOREM_%02d" % i
         for i in range(25)
     }
 

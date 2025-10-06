@@ -92,8 +92,8 @@ use std::fs;
 use std::path::PathBuf;
 
 // Default constants
-const DEFAULT_NUM_BUCKETS: usize = 10;
-const DEFAULT_BUCKET_SIZE: usize = 20;
+const DEFAULT_NUM_BUCKETS: usize = 14;
+const DEFAULT_BUCKET_SIZE: usize = 8;
 const DEFAULT_NGRAM_SIZE: usize = 5;
 const DEFAULT_PERMUTATION_SEED: u64 = 42;
 const DEFAULT_TOKENIZER: &str = "cl100k_base";
