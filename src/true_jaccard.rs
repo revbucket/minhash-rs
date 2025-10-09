@@ -1,5 +1,4 @@
 
-use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -36,6 +35,7 @@ pub fn true_jaccard(
     annotate_key: &str,
     hotnode_size: Option<usize>,
     hotnode_dir: Option<PathBuf>,
+    parallel_nest: usize
 ) -> Result<()> {
     let start_main = Instant::now();
     println!("Starting true jaccard checks");
@@ -68,7 +68,6 @@ pub fn true_jaccard(
     let ngram_size = config_obj.minhash_params.ngram_size;
     let tokenizer_name = config_obj.minhash_params.tokenizer;
     let tokenizer = OmniTokenizer::new(&tokenizer_name).unwrap();
-
     // Gather files into groups
     let paths = expand_dirs(vec![input_dir.clone()], None).unwrap();
     let input_groups: Vec<Vec<PathBuf>> = if let Some(group_regex) = group_regex {
@@ -98,9 +97,10 @@ pub fn true_jaccard(
 
     // Loop over each "group" and calculate exact jaccard similarities
     let pbar = build_pbar(paths.len(), "Paths");
+    let chunk_size = (paths.len() -1)/ parallel_nest + 1; 
 
 
-    input_groups.par_chunks(250).for_each(|chunk| {
+    input_groups.par_chunks(chunk_size).for_each(|chunk| {
     	for pvec in chunk {
 			let (group_total, group_hotnode, group_remove) = true_jacc_group(
 		            &pvec,

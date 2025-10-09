@@ -680,6 +680,9 @@ enum Commands {
         #[arg(long)]
         hotnode_dir: Option<PathBuf>,
 
+        /// Parallel nest: How many outer loops we split this up into. Somewhere between 4-16 is probably best
+        #[arg(long, default_value_t=4)]
+        parallel_nest: usize
 
     }
 }
@@ -864,9 +867,10 @@ fn main() {
             tokenizer,
             annotate_key,
             hotnode_size, 
-            hotnode_dir
+            hotnode_dir, 
+            parallel_nest
         } => {
-            true_jaccard(input_dir, output_dir, minhash_cc_id.clone(), group_regex.clone(), config.clone(), *jaccard_threshold, ngram_size.clone(), tokenizer.clone(), annotate_key, hotnode_size.clone(), hotnode_dir.clone())
+            true_jaccard(input_dir, output_dir, minhash_cc_id.clone(), group_regex.clone(), config.clone(), *jaccard_threshold, ngram_size.clone(), tokenizer.clone(), annotate_key, hotnode_size.clone(), hotnode_dir.clone(), *parallel_nest)
         }
 
         _ => Ok(()),
