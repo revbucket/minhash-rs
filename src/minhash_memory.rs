@@ -135,6 +135,7 @@ pub fn minhash_memory(
     bucket_size: Option<usize>,
     ngram_size: Option<usize>,
     permutation_seed: Option<u64>,
+    num_sig_chunks: Option<usize>,
     tokenizer: Option<String>,
     annotate: Option<bool>,
     annotate_key: Option<String>,
@@ -157,7 +158,7 @@ pub fn minhash_memory(
         eng_params: EngOverrides {
             num_docs: None,
             max_lines_per_path: None,
-            num_sig_chunks: Some(32),
+            num_sig_chunks: Some(num_sig_chunks.unwrap_or(32)),
         },
         output_params: OutputOverrides {
             annotate: annotate,

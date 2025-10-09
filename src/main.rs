@@ -395,6 +395,10 @@ enum Commands {
         #[arg(long)]
         permutation_seed: Option<u64>,
 
+        /// Number of signature chunks in the (temporary) storage 
+        #[arg(long)]
+        num_sig_chunks: Option<usize>,
+
         /// Tokenizer: "cl100k", "p50k", "uniseg", or character-level (default)
         #[arg(long)]
         tokenizer: Option<String>,
@@ -750,6 +754,7 @@ fn main() {
             bucket_size,
             ngram_size,
             permutation_seed,
+            num_sig_chunks,
             tokenizer,
             annotate,
             annotate_key,
@@ -766,6 +771,7 @@ fn main() {
             *bucket_size,
             *ngram_size,
             *permutation_seed,
+            num_sig_chunks.clone(),
             tokenizer.clone(),
             annotate.clone(),
             annotate_key.clone(),
