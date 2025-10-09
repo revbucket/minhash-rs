@@ -95,25 +95,14 @@ pub fn true_jaccard(
     let hotnode_count = AtomicUsize::new(0);
     let remove_count = AtomicUsize::new(0);
 
-    // Experimental thread stuff 
-    let outer_pool = ThreadPoolBuilder::new()
-    	.num_threads(16)
-    	.build()
-    	.unwrap();
-
-    let inner_pool = ThreadPoolBuilder::new()
-    	.num_threads(8)
-    	.build()
-    	.unwrap();
-
-    // </ experimental thread stuff
 
     // Loop over each "group" and calculate exact jaccard similarities
     let pbar = build_pbar(paths.len(), "Paths");
-    outer_pool.install(|| {
-	    input_groups.par_iter().for_each(|pvec| {
-	    	inner_pool.install(|| {
-		        let (group_total, group_hotnode, group_remove) = true_jacc_group(
+
+
+    input_groups.par_chunks(250).for_each(|chunk| {
+    	for pvec in chunk {
+			let (group_total, group_hotnode, group_remove) = true_jacc_group(
 		            &pvec,
 		            output_dir,
 		            minhash_cc_id.clone(),
@@ -127,13 +116,13 @@ pub fn true_jaccard(
 		            &output_counter,
 		            &new_cc_counter,
 		        ).unwrap();
-		        total_count.fetch_add(group_total, Ordering::SeqCst);
-		        hotnode_count.fetch_add(group_hotnode, Ordering::SeqCst);
-		        remove_count.fetch_add(group_remove, Ordering::SeqCst);
-		        pbar.inc(pvec.len() as u64);
-		    });
-	    });
-	});
+	        total_count.fetch_add(group_total, Ordering::SeqCst);
+	        hotnode_count.fetch_add(group_hotnode, Ordering::SeqCst);
+	        remove_count.fetch_add(group_remove, Ordering::SeqCst);
+	        pbar.inc(pvec.len() as u64);    		
+    	}
+    });
+
     let total_count = total_count.into_inner();
     let hotnode_count = hotnode_count.into_inner();
     let remove_count = remove_count.into_inner();
