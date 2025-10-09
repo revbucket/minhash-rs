@@ -161,8 +161,8 @@ fn true_jacc_group(pvec: &Vec<PathBuf>, output_dir: &PathBuf, minhash_cc_id: Opt
 		all_docs.into_par_iter().for_each(|v| {
 			let cc_id_response = json_get(&v, &minhash_cc_id);
 			// If minhash_cc_id is specified, and present, group according to it
-			if let Some(cc_id) = cc_id_response {						
-				groups.entry(cc_id.as_str().unwrap().to_string()).or_default().push(v);
+			if let Some(cc_id) = cc_id_response {			
+				groups.entry(cc_id.to_string()).or_default().push(v);
 			} else {
 				// If specified, just ignore these docs (but make sure they get written)				
 				let mut output_guard = output_docs.lock().unwrap();
@@ -177,11 +177,20 @@ fn true_jacc_group(pvec: &Vec<PathBuf>, output_dir: &PathBuf, minhash_cc_id: Opt
 
 	// Step 2: Split off all "hot nodes" and write them
 	// (Parallel across groups)
+	let mut group_freq :HashMap<usize, usize> =  HashMap::new();
+	groups.iter().for_each(|entry| {
+		let len = entry.value().len();
+		let cur_val = group_freq.get(&len).unwrap_or(&0);
+		group_freq.insert(len, cur_val + 1);
+		//let cur_val = 
+		//group_freq.
+		//group_freq.entry(len).and_modify(|c| *c += 1);
+	});
+
 	let (hotnodes, proc_groups): (Vec<_>, Vec<_>) = groups
 	    .into_par_iter()
 	    .map(|(_k,v)| v)
 	    .partition(|v| v.len() >= hotnode_size);
-
 	let hotnode_count = hotnodes.iter().map(|v| v.len()).sum();
 	let hotnode_docs: Vec<JSONValue> = hotnodes
 	    .into_par_iter()
