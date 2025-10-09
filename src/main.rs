@@ -34,7 +34,7 @@
 //!
 //! ### Exact Deduplication (Small Dataset)
 //! ```bash
-//! dedup exact-dedup-memory \
+//! cargo run --release -- exact-dedup-memory \
 //!   --input-dir /data/docs \
 //!   --output-dir /data/deduped \
 //!   --text-key "content"
@@ -42,7 +42,7 @@
 //!
 //! ### Fuzzy Deduplication (Small Dataset)
 //! ```bash
-//! dedup minhash-memory \
+//! cargo run --release -- minhash-memory \
 //!   --input-dir /data/docs \
 //!   --storage-dir /tmp/work \
 //!   --output-dir /data/deduped \
@@ -54,12 +54,12 @@
 //! ### Fuzzy Deduplication (Large Dataset, Distributed)
 //! ```bash
 //! # Step 1: Build file map (run once)
-//! dedup mh-build-file-map \
+//! cargo run --release -- mh-build-file-map \
 //!   --input-dir /data/docs \
 //!   --storage-dir /shared/work
 //!
 //! # Step 2: Hash documents (run on multiple workers with different path-chunk values)
-//! dedup mh-hash-docs \
+//! cargo run --release -- mh-hash-docs \
 //!   --local-input /data/docs \
 //!   --storage-dir /shared/work \
 //!   --text-key "text" \
@@ -67,16 +67,16 @@
 //!   --num-path-chunks 10
 //!
 //! # Step 3: Gather edges (run once, requires all signatures)
-//! dedup mh-gather-edges \
+//! cargo run --release -- mh-gather-edges \
 //!   --storage-dir /shared/work
 //!
 //! # Step 4: Build union-find (run once on single machine)
-//! dedup mh-build-uf \
+//! cargo run --release -- mh-build-uf \
 //!   --storage-dir /shared/work \
 //!   --num-path-chunks 10
 //!
 //! # Step 5: Clean files (run on multiple workers with different path-chunk values)
-//! dedup mh-clean-files \
+//! cargo run --release -- mh-clean-files \
 //!   --input-dir /data/docs \
 //!   --storage-dir /shared/work \
 //!   --output-dir /data/deduped \
@@ -100,6 +100,7 @@ use crate::minhash_disk::{
     mh_build_file_map, mh_build_uf, mh_clean_files, mh_gather_edges, mh_hash_docs,
 };
 use crate::minhash_memory::minhash_memory;
+use crate::true_jaccard::true_jaccard;
 
 pub mod exact_dedup_disk;
 pub mod exact_dedup_memory;
@@ -110,6 +111,7 @@ pub mod minhash_memory;
 pub mod storage;
 pub mod uf_rush2;
 pub mod utils;
+pub mod true_jaccard;
 
 /* 4 basic use cases here:
 {Exact, Fuzzy} x {Memory, Disk} deduplication:
@@ -234,7 +236,7 @@ enum Commands {
     /// is processed in memory, so this is best for datasets under ~10GB.
     ///
     /// EXAMPLE:
-    ///   dedup exact-dedup-memory \
+    ///   cargo run --release --  exact-dedup-memory \
     ///     --input-dir /data/documents \
     ///     --output-dir /data/unique \
     ///     --text-key "content" \
@@ -274,7 +276,7 @@ enum Commands {
     /// Hashes all documents and groups them into bins for parallel processing.
     ///
     /// EXAMPLE:
-    ///   dedup exact-dedup-disk-group \
+    ///   cargo run --release --  exact-dedup-disk-group \
     ///     --input-dir /data/documents \
     ///     --storage-dir /scratch/work \
     ///     --hash-key "doc_id" \
@@ -313,7 +315,7 @@ enum Commands {
     /// documents and removes duplicates.
     ///
     /// EXAMPLE:
-    ///   dedup exact-dedup-disk-prune \
+    ///   cargo run --release --  exact-dedup-disk-prune \
     ///     --storage-dir /scratch/work \
     ///     --output-dir /data/unique \
     ///     --hash-key "doc_id"
@@ -346,7 +348,7 @@ enum Commands {
     /// pipeline in one command. Best for datasets under ~10GB.
     ///
     /// EXAMPLE:
-    ///   dedup minhash-memory \
+    ///   cargo run --release --  minhash-memory \
     ///     --input-dir /data/documents \
     ///     --storage-dir /tmp/work \
     ///     --output-dir /data/deduped \
@@ -385,7 +387,7 @@ enum Commands {
         #[arg(long)]
         bucket_size: Option<usize>,
 
-        /// N-gram size for shingling (default: 3 = trigrams)
+        /// N-gram size for shingling (default: 5)
         #[arg(long)]
         ngram_size: Option<usize>,
 
@@ -424,7 +426,7 @@ enum Commands {
     /// any other MinHash steps.
     ///
     /// EXAMPLE:
-    ///   dedup mh-build-file-map \
+    ///   cargo run --release --  mh-build-file-map \
     ///     --input-dir /data/documents \
     ///     --storage-dir /shared/work
     #[clap(arg_required_else_help = true)]
@@ -445,7 +447,7 @@ enum Commands {
     ///
     /// EXAMPLE:
     ///   # Worker 0 processes chunk 0 of 10
-    ///   dedup mh-hash-docs \
+    ///   cargo run --release --  mh-hash-docs \
     ///     --local-input /data/documents \
     ///     --storage-dir /shared/work \
     ///     --text-key "text" \
@@ -518,7 +520,7 @@ enum Commands {
     /// All signature files must be present before running this step.
     ///
     /// EXAMPLE:
-    ///   dedup mh-gather-edges \
+    ///   cargo run --release --  mh-gather-edges \
     ///     --storage-dir /shared/work
     #[clap(arg_required_else_help = true)]
     MhGatherEdges {
@@ -546,7 +548,7 @@ enum Commands {
     /// Cannot be parallelized across machines.
     ///
     /// EXAMPLE:
-    ///   dedup mh-build-uf \
+    ///   cargo run --release --  mh-build-uf \
     ///     --storage-dir /shared/work \
     ///     --num-path-chunks 10
     #[clap(arg_required_else_help = true)]
@@ -575,7 +577,7 @@ enum Commands {
     ///
     /// EXAMPLE:
     ///   # Worker 0 processes chunk 0 of 10
-    ///   dedup mh-clean-files \
+    ///   cargo run --release --  mh-clean-files \
     ///     --input-dir /data/documents \
     ///     --storage-dir /shared/work \
     ///     --output-dir /data/deduped \
@@ -631,6 +633,55 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         cleanup_storage: bool,
     },
+
+    #[clap(arg_required_else_help = true)]
+    TrueJaccard {
+        /// Directory containing annotated minhash data
+        #[arg(required = true, long)]
+        input_dir: PathBuf,
+
+        /// Directory where output (annotated) files will be written
+        #[arg(required = true, long)]
+        output_dir: PathBuf,
+
+        /// The key where the minhash group ids are contained (if missing, do nothing). If None, do full pairwise O(n^2) comparisons
+        #[arg(long)]
+        minhash_cc_id: Option<String>,
+
+        /// If non-null, is a regex that, when selected for, creates groups of files to check (easier for parallelism)
+        #[arg(long)]
+        group_regex: Option<String>,
+
+        /// Optional: Path to YAML configuration file
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// Threshold for jaccard similarity,
+        #[arg(required=true, long)]
+        jaccard_threshold: f64,
+
+        /// N-gram size for shingling (default: 5)
+        #[arg(long)]
+        ngram_size: Option<usize>,
+
+        /// Tokenizer: "cl100k", "p50k", "uniseg", or character-level (default)
+        #[arg(long)]
+        tokenizer: Option<String>,
+
+        /// Annotate keys for the output
+        #[arg(required=true, long)]
+        annotate_key: String,
+
+        /// If the group is bigger than this size, just put these docs into the "hotnode_dir"
+        #[arg(long)]
+        hotnode_size: Option<usize>,
+
+        /// If group is bigger than ^, this is where the docs go
+        #[arg(long)]
+        hotnode_dir: Option<PathBuf>,
+
+
+    }
 }
 
 
@@ -801,6 +852,22 @@ fn main() {
             *remove_duplicates,
             *cleanup_storage,
         ),
+
+        Commands::TrueJaccard {
+            input_dir,
+            output_dir,
+            minhash_cc_id,
+            group_regex,
+            config,
+            jaccard_threshold,
+            ngram_size,
+            tokenizer,
+            annotate_key,
+            hotnode_size, 
+            hotnode_dir
+        } => {
+            true_jaccard(input_dir, output_dir, minhash_cc_id.clone(), group_regex.clone(), config.clone(), *jaccard_threshold, ngram_size.clone(), tokenizer.clone(), annotate_key, hotnode_size.clone(), hotnode_dir.clone())
+        }
 
         _ => Ok(()),
     };

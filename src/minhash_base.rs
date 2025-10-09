@@ -185,7 +185,7 @@ impl FileMap {
 /// - `"p50k"`: OpenAI's p50k_base tokenizer  
 /// - `"uniseg"`: Unicode word boundary segmentation
 /// - Default: Character-level (byte-based)
-struct OmniTokenizer {
+pub struct OmniTokenizer {
     tokenizer_name: String,
     inner: CoreBPE,
 }
@@ -193,7 +193,7 @@ struct OmniTokenizer {
 
 impl OmniTokenizer {
     /// Creates a new tokenizer with the specified strategy.    
-    fn new(tokenizer_name: &str) -> Result<Self, Error> {
+    pub fn new(tokenizer_name: &str) -> Result<Self, Error> {
         if tokenizer_name == "cl100k" {
             Ok(OmniTokenizer {
                 tokenizer_name: tokenizer_name.to_string(),
@@ -208,7 +208,7 @@ impl OmniTokenizer {
     }
 
     /// Encodes text into a sequence of token IDs.
-    fn encode(&self, text: &str) -> Vec<usize> {
+    pub fn encode(&self, text: &str) -> Vec<usize> {
         match self.tokenizer_name.as_str() {
             "p50k" => self.inner.encode_with_special_tokens(text),
             "cl100k" => self.inner.encode_with_special_tokens(text),
@@ -445,7 +445,7 @@ fn process_path(
 }
 
 /// Preprocesses text by cleaning and tokenizing.
-fn preprocess_text(text: &str, tokenizer: &OmniTokenizer) -> Vec<usize> {
+pub fn preprocess_text(text: &str, tokenizer: &OmniTokenizer) -> Vec<usize> {
     let text = clean_text(text);
     let tokens = tokenizer.encode(&text);
     tokens
