@@ -1,4 +1,5 @@
 
+use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -86,34 +87,56 @@ pub fn true_jaccard(
         vec![paths.clone()]
     };
 
+
     let hotnode_counter = AtomicUsize::new(0);
     let output_counter = AtomicUsize::new(0);
     let new_cc_counter = AtomicUsize::new(0);
-    let mut total_count = 0;
-    let mut hotnode_count = 0;
-    let mut remove_count = 0;
+    let total_count = AtomicUsize::new(0);
+    let hotnode_count = AtomicUsize::new(0);
+    let remove_count = AtomicUsize::new(0);
+
+    // Experimental thread stuff 
+    let outer_pool = ThreadPoolBuilder::new()
+    	.num_threads(16)
+    	.build()
+    	.unwrap();
+
+    let inner_pool = ThreadPoolBuilder::new()
+    	.num_threads(8)
+    	.build()
+    	.unwrap();
+
+    // </ experimental thread stuff
+
     // Loop over each "group" and calculate exact jaccard similarities
     let pbar = build_pbar(paths.len(), "Paths");
-    for pvec in input_groups {
-        let (group_total, group_hotnode, group_remove) = true_jacc_group(
-            &pvec,
-            output_dir,
-            minhash_cc_id.clone(),
-            jaccard_threshold,
-            ngram_size,
-            &tokenizer,
-            hotnode_size,
-            &hotnode_counter,
-            &hotnode_dir,
-            annotate_key.to_string(),
-            &output_counter,
-            &new_cc_counter,
-        )?;
-        total_count += group_total;
-        hotnode_count += group_hotnode;
-        remove_count += group_remove;
-        pbar.inc(pvec.len() as u64);
-    }
+    outer_pool.install(|| {
+	    input_groups.par_iter().for_each(|pvec| {
+	    	inner_pool.install(|| {
+		        let (group_total, group_hotnode, group_remove) = true_jacc_group(
+		            &pvec,
+		            output_dir,
+		            minhash_cc_id.clone(),
+		            jaccard_threshold,
+		            ngram_size,
+		            &tokenizer,
+		            hotnode_size,
+		            &hotnode_counter,
+		            &hotnode_dir,
+		            annotate_key.to_string(),
+		            &output_counter,
+		            &new_cc_counter,
+		        ).unwrap();
+		        total_count.fetch_add(group_total, Ordering::SeqCst);
+		        hotnode_count.fetch_add(group_hotnode, Ordering::SeqCst);
+		        remove_count.fetch_add(group_remove, Ordering::SeqCst);
+		        pbar.inc(pvec.len() as u64);
+		    });
+	    });
+	});
+    let total_count = total_count.into_inner();
+    let hotnode_count = hotnode_count.into_inner();
+    let remove_count = remove_count.into_inner();
 
     println!(
         "Finished true jaccard checks in {} secs",
