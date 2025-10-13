@@ -220,6 +220,7 @@ fn true_jacc_group(pvec: &Vec<PathBuf>, output_dir: &PathBuf, minhash_cc_id: Opt
 
 	// Step 3: Make token-ngram sets, gather indices to check, and check jaccard similarities
 	// (parallel across docs, then pairs of docs)
+	let start_tok = Instant::now();
 	let toksets = toksetify(&proc_groups, tokenizer, ngram_size).unwrap();
 	let pair_indices = generate_pair_indices::<HashSet<u64>>(&toksets);
 	let pbar = build_pbar(pair_indices.len(), "Pair checks");
@@ -248,8 +249,11 @@ fn true_jacc_group(pvec: &Vec<PathBuf>, output_dir: &PathBuf, minhash_cc_id: Opt
 		}
 
 	}).collect();
+	println!("Finished tokset in {:?} msecs", start_tok.elapsed().as_millis());
 	// Step 4: Take passing pairs/edges and enter into a UnionFind structure to get CC's
 	// (Parallel everywhere)
+
+
 	let start_uf = Instant::now();
 	let uf = UFRush::new();
 
