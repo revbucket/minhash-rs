@@ -526,7 +526,14 @@ fn write_docs(
             prefix,
             counter.fetch_add(1, Ordering::SeqCst)));
         let start_copy = Instant::now();
-        let contents: Vec<u8> = group.into_iter().flat_map(|i| &serialized[i]).copied().collect();
+	    // Pre-calculate total size
+	    let total_size: usize = group.iter().map(|&i| serialized[i].len()).sum();
+	    let mut contents = Vec::with_capacity(total_size);
+	    
+	    // Use extend_from_slice instead of flat_map
+	    for &i in &group {
+	        contents.extend_from_slice(&serialized[i]);
+	    }        
         copy_time.fetch_add(start_copy.elapsed().as_millis() as usize, Ordering::Relaxed);
 
         let start_write = Instant::now();
