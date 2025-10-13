@@ -517,13 +517,21 @@ fn write_docs(
     	idx_groups.push(cur_group)
     }
 
+    let copy_time = AtomicUsize::new(0);
+    let write_time = AtomicUsize::new(0);
     idx_groups.into_par_iter().for_each(|group| {
+
         let output_file = output_dir.clone().join(format!(
             "{}_file_{:08}.jsonl.zst",
             prefix,
             counter.fetch_add(1, Ordering::SeqCst)));
+        let start_copy = Instant::now();
         let contents: Vec<u8> = group.into_iter().flat_map(|i| &serialized[i]).copied().collect();
+        copy_time.fetch_add(start_copy.elapsed().as_millis() as usize, Ordering::Relaxed);
+
+        let start_write = Instant::now();
         write_mem_to_pathbuf(&contents, &output_file).unwrap();
+        write_time.fetch_add(start_write.elapsed().as_millis() as usize, Ordering::Relaxed);
     });
     
 
