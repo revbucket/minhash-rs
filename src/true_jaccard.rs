@@ -454,10 +454,14 @@ fn par_annotate(
     });
 
     let remove_count = AtomicUsize::new(0);
+    let set_count = AtomicUsize::new(0);
+    let set_loop = AtomicUsize::new(0);
+    let start_set = Instant::now();
     let new_docs: Vec<JSONValue> = flat_with_indices 
         .into_par_iter()
         .enumerate()
         .map(|(doc_idx, (_, mut obj))| {
+        	let start_set_loop = Instant::now();
             if let Some(parent) = parent_lookup[doc_idx] {
                 let cc_id = *cc_id_lookup.get(&parent).unwrap(); 
                 let cc_size = *cc_size.get(&parent).unwrap();
@@ -465,14 +469,16 @@ fn par_annotate(
                 if cc_idx > 0 {
                     remove_count.fetch_add(1, Ordering::Relaxed);
                 }
-
+                let start_set = Instant::now();
                 json_set(&mut obj, annotate_key,
                     json!({"cc_id": cc_id, "cc_size": cc_size, "cc_idx": cc_idx}))
                     .unwrap();
+                set_count.fetch_add(start_set.elapsed().as_millis() as usize, Ordering::Relaxed);
             }
+            set_loop.fetch_add(start_set_loop.elapsed().as_millis() as usize, Ordering::Relaxed);
             obj
         }).collect();
-
+    println!("SET TIME {:?} | {:?} | {:?}", start_set.elapsed().as_millis(), set_loop.into_inner(), set_count.into_inner());
     Ok((new_docs, remove_count.into_inner()))
 }
 
