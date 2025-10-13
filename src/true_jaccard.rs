@@ -304,10 +304,11 @@ fn true_jacc_group(
     );
 
     // Step 5: Annotate the docs and write to new directory
-    let start_anno = Instant::now();
     let (annotated_docs, remove_count) =
         par_annotate(proc_groups, n, cc_sizes, cc_id_lookup, &uf, &annotate_key).unwrap();
     output_docs.extend(annotated_docs);
+    let start_anno = Instant::now();
+
     write_docs(output_docs.to_vec(), output_counter, output_dir, "chunk").unwrap();
     println!(
         "Finished anno in {:?} msecs",
@@ -488,29 +489,45 @@ fn write_docs(
     output_dir: &PathBuf,
     prefix: &str,
 ) -> Result<(), Error> {
-    let mut doc_contents: Vec<u8> = Vec::new();
-    for doc in docs.into_iter() {
-        let docstr = serde_json::to_vec(&doc).unwrap();
-        doc_contents.extend(docstr);
-        doc_contents.push(b'\n');
-        if doc_contents.len() >= OUTPUT_FILE_SIZE {
-            let output_file = output_dir.clone().join(format!(
-                "{:}_file_{:08}.jsonl.zst",
-                prefix,
-                counter.fetch_add(1, Ordering::SeqCst)
-            ));
-            write_mem_to_pathbuf(&doc_contents, &output_file).unwrap();
-            doc_contents.clear();
-        }
+    // Parallel: Serialize all docs
+    let serialized: Vec<Vec<u8>> = docs
+        .into_par_iter()
+        .map(|doc| {
+            let mut bytes = serde_json::to_vec(&doc).unwrap();
+            bytes.push(b'\n');
+            bytes
+        })
+        .collect();
+    
+    // Parallel: Group into chunks (just indices)
+    let mut idx_groups: Vec<Vec<usize>> = Vec::new();
+
+    let mut cur_group: Vec<usize> = Vec::new();
+    let mut cur_size = 0;
+    for (i,v) in serialized.iter().enumerate() {
+    	let len = v.len();
+    	cur_group.push(i);
+    	cur_size += len;
+    	if cur_size >= OUTPUT_FILE_SIZE {
+            idx_groups.push(std::mem::take(&mut cur_group));
+    		cur_size = 0;
+    	}    	
     }
-    if !doc_contents.is_empty() {
+    if cur_group.len() > 0 {
+    	idx_groups.push(cur_group)
+    }
+
+    idx_groups.into_par_iter().for_each(|group| {
         let output_file = output_dir.clone().join(format!(
-            "{:}_file_{:08}.jsonl.zst",
+            "{}_file_{:08}.jsonl.zst",
             prefix,
-            counter.fetch_add(1, Ordering::SeqCst)
-        ));
-        write_mem_to_pathbuf(&doc_contents, &output_file).unwrap();
-    }
+            counter.fetch_add(1, Ordering::SeqCst)));
+        let contents: Vec<u8> = group.into_iter().flat_map(|i| &serialized[i]).copied().collect();
+        write_mem_to_pathbuf(&contents, &output_file).unwrap();
+    });
+    
+
+    
     Ok(())
 }
 
