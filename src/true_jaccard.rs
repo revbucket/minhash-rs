@@ -390,7 +390,7 @@ fn par_annotate(
     uf: &UFRush,
     annotate_key: &String,
 ) -> Result<(Vec<JSONValue>, usize), Error> {
-	// Pairs are like [(uf_index/id, doc), ...]	 
+    // Pairs are like [(uf_index/id, doc), ...]     
     let flat_with_indices: Vec<(usize, JSONValue)> = docs 
         .into_par_iter()
         .enumerate()
@@ -405,30 +405,48 @@ fn par_annotate(
 
     // Collect parents in a vector format (matches index w/ flat_with_indices, but has the doc parent)
     let parent_lookup: Vec<Option<usize>> = flat_with_indices
-    	.par_iter()
-    	.map(|(i, _)| {
-    		uf.nodes.get(i).map(|uf_val| {
-    			let val = uf_val.value().load(Ordering::Relaxed);
-    			uf_parent(val)
-    		})
-    	})
-    	.collect();
+        .par_iter()
+        .map(|(i, _)| {
+            uf.nodes.get(i).map(|uf_val| {
+                let val = uf_val.value().load(Ordering::Relaxed);
+                uf_parent(val)
+            })
+        })
+        .collect();
 
+    // Build (parent, doc_idx) pairs in parallel
+    let parent_doc_pairs: Vec<(usize, usize)> = parent_lookup
+        .par_iter()
+        .enumerate()
+        .filter_map(|(doc_idx, parent_opt)| {
+            parent_opt.map(|parent| (parent, doc_idx))
+        })
+        .collect();
 
-
-    // Group document indices by their parent {parent_idx -> [doc_idx,...]}
-    let parent_groups: DashMap<usize, Vec<usize>> = DashMap::new();
-    parent_lookup.iter().enumerate().for_each(|(doc_idx, parent_opt)| {
-    	if let Some(parent) = parent_opt {
-    		parent_groups.entry(*parent).or_default().push(doc_idx);
-    	}
-    });
-
+    // Group by parent using parallel fold + reduce (no race conditions!)
+    let parent_groups: HashMap<usize, Vec<usize>> = parent_doc_pairs
+        .into_par_iter()
+        .fold(
+            || HashMap::new(),
+            |mut acc: HashMap<usize, Vec<usize>>, (parent, doc_idx)| {
+                acc.entry(parent).or_default().push(doc_idx);
+                acc
+            }
+        )
+        .reduce(
+            || HashMap::new(),
+            |mut acc1, acc2| {
+                for (parent, mut docs) in acc2 {
+                    acc1.entry(parent).or_default().append(&mut docs);
+                }
+                acc1
+            }
+        );
 
     // Map doc_idx -> cc_idx
     let cc_idx_array: DashMap<usize, usize> = DashMap::new();
     parent_groups.into_par_iter().for_each(|(_parent, mut indices)| {
-        // Sort to ensure consistent ordering (optional, but good practice)
+        // Sort to ensure consistent ordering
         indices.sort_unstable();
         for (cc_idx, &doc_idx) in indices.iter().enumerate() {
             cc_idx_array.insert(doc_idx, cc_idx);
@@ -437,23 +455,23 @@ fn par_annotate(
 
     let remove_count = AtomicUsize::new(0);
     let new_docs: Vec<JSONValue> = flat_with_indices 
-    	.into_par_iter()
-    	.enumerate()
-    	.map(|(doc_idx, (_, mut obj))| {
-    		if let Some(parent)  = parent_lookup[doc_idx] {
-    			let cc_id = *cc_id_lookup.get(&parent).unwrap(); 
-    			let cc_size = *cc_size.get(&parent).unwrap();
-    			let cc_idx = *cc_idx_array.get(&doc_idx).unwrap();
-    			if cc_idx > 0 {
-    				remove_count.fetch_add(1, Ordering::Relaxed);
-    			}
+        .into_par_iter()
+        .enumerate()
+        .map(|(doc_idx, (_, mut obj))| {
+            if let Some(parent) = parent_lookup[doc_idx] {
+                let cc_id = *cc_id_lookup.get(&parent).unwrap(); 
+                let cc_size = *cc_size.get(&parent).unwrap();
+                let cc_idx = *cc_idx_array.get(&doc_idx).unwrap();
+                if cc_idx > 0 {
+                    remove_count.fetch_add(1, Ordering::Relaxed);
+                }
 
-    			json_set(&mut obj, annotate_key,
-    				json!({"cc_id": cc_id, "cc_size": cc_size, "cc_idx": cc_idx}))
-    				.unwrap();
-    		}
-    		obj
-    }).collect();
+                json_set(&mut obj, annotate_key,
+                    json!({"cc_id": cc_id, "cc_size": cc_size, "cc_idx": cc_idx}))
+                    .unwrap();
+            }
+            obj
+        }).collect();
 
     Ok((new_docs, remove_count.into_inner()))
 }
