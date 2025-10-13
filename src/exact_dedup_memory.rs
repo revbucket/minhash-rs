@@ -25,7 +25,6 @@
 //! - 64-bit: 50% collision chance at ~5 billion documents
 //! - 128-bit: 50% collision chance at ~2^64 documents (not a practical concern)
 
-
 use anyhow::{anyhow, Error, Result};
 use dashmap::DashMap;
 use rayon::prelude::*;
@@ -239,7 +238,11 @@ fn exact_dedup_impl<K: DocHash>(
         pbar.inc(1);
     });
 
-    let kept_docs = if let Some(_annokey) = annotate {counter.len()} else {kept_docs.into_inner()};
+    let kept_docs = if let Some(_annokey) = annotate {
+        counter.len()
+    } else {
+        kept_docs.into_inner()
+    };
     Ok((seen_docs.into_inner(), kept_docs))
 }
 

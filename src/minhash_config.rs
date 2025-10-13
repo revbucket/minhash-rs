@@ -397,7 +397,7 @@ impl Config {
             let file_config: Config = serde_yaml::from_str(&config_content)?;
             config = file_config;
         }
-        
+
         // Apply CLI overrides
         overrides.apply_to(&mut config);
 

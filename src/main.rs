@@ -85,7 +85,6 @@
 //!   --remove-duplicates true
 //! ```
 
-
 // External crates
 use clap::{Parser, Subcommand};
 
@@ -109,9 +108,9 @@ pub mod minhash_config;
 pub mod minhash_disk;
 pub mod minhash_memory;
 pub mod storage;
+pub mod true_jaccard;
 pub mod uf_rush2;
 pub mod utils;
-pub mod true_jaccard;
 
 /* 4 basic use cases here:
 {Exact, Fuzzy} x {Memory, Disk} deduplication:
@@ -182,7 +181,7 @@ Auxiliary phase: For examination purposes, we can look at each connected compone
 ----------------
 Some design notes:
 
-+ Config: This can be done without a config, but your 
++ Config: This can be done without a config, but your
 
 + Disk space: We rely heavily on storing auxiliary data structures on disk.
               Basically there's a state change after every phase where we make
@@ -229,7 +228,6 @@ enum Commands {
     /*============================================================
     =            Exact Deduplication Methods                     =
     ============================================================*/
-
     /// Exact deduplication for small datasets (all-in-memory processing)
     ///
     /// Removes documents with identical content in a single pass. All data
@@ -341,7 +339,6 @@ enum Commands {
     /*============================================================
     =            MinHash Deduplication Methods                   =
     ============================================================*/
-
     /// MinHash fuzzy deduplication for small datasets (all-in-memory)
     ///
     /// Removes near-duplicate documents using MinHash LSH. Runs entire
@@ -395,7 +392,7 @@ enum Commands {
         #[arg(long)]
         permutation_seed: Option<u64>,
 
-        /// Number of signature chunks in the (temporary) storage 
+        /// Number of signature chunks in the (temporary) storage
         #[arg(long)]
         num_sig_chunks: Option<usize>,
 
@@ -661,7 +658,7 @@ enum Commands {
         config: Option<PathBuf>,
 
         /// Threshold for jaccard similarity,
-        #[arg(required=true, long)]
+        #[arg(required = true, long)]
         jaccard_threshold: f64,
 
         /// N-gram size for shingling (default: 5)
@@ -673,7 +670,7 @@ enum Commands {
         tokenizer: Option<String>,
 
         /// Annotate keys for the output
-        #[arg(required=true, long)]
+        #[arg(required = true, long)]
         annotate_key: String,
 
         /// If the group is bigger than this size, just put these docs into the "hotnode_dir"
@@ -685,12 +682,14 @@ enum Commands {
         hotnode_dir: Option<PathBuf>,
 
         /// Parallel nest: How many outer loops we split this up into. Somewhere between 4-16 is probably best
-        #[arg(long, default_value_t=4)]
-        parallel_nest: usize
+        #[arg(long, default_value_t = 4)]
+        parallel_nest: usize,
 
-    }
+        /// Offset for the connected component id -- useful when doing this in a multi-node setting. Defaults to 0
+        #[arg(long)]
+        id_offset: Option<usize>,
+    },
 }
-
 
 /*=================================================================
 =                                 MAIN                            =
@@ -872,12 +871,25 @@ fn main() {
             ngram_size,
             tokenizer,
             annotate_key,
-            hotnode_size, 
-            hotnode_dir, 
-            parallel_nest
-        } => {
-            true_jaccard(input_dir, output_dir, minhash_cc_id.clone(), group_regex.clone(), config.clone(), *jaccard_threshold, ngram_size.clone(), tokenizer.clone(), annotate_key, hotnode_size.clone(), hotnode_dir.clone(), *parallel_nest)
-        }
+            hotnode_size,
+            hotnode_dir,
+            parallel_nest,
+            id_offset,
+        } => true_jaccard(
+            input_dir,
+            output_dir,
+            minhash_cc_id.clone(),
+            group_regex.clone(),
+            config.clone(),
+            *jaccard_threshold,
+            ngram_size.clone(),
+            tokenizer.clone(),
+            annotate_key,
+            hotnode_size.clone(),
+            hotnode_dir.clone(),
+            *parallel_nest,
+            id_offset.clone(),
+        ),
 
         _ => Ok(()),
     };

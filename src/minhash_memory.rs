@@ -12,9 +12,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-
-
-
 /// Runs the complete MinHash deduplication pipeline in a single function call.
 ///
 /// This is a convenience function for single-machine deployments where all input data
@@ -171,7 +168,9 @@ pub fn minhash_memory(
 
     // Build the file map to get path_ids
     let file_map = FileMap::new(input_dir, &None).unwrap();
-    file_map.save(&storage_dir.clone().join("filemap.json.gz")).unwrap();
+    file_map
+        .save(&storage_dir.clone().join("filemap.json.gz"))
+        .unwrap();
 
     // Then create the hashes of all documents and store them in storage_dir
     hash_only(

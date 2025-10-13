@@ -25,7 +25,6 @@ fn get_file_map_loc(storage_dir: &PathBuf) -> PathBuf {
     storage_dir.clone().join("filemap.json.gz")
 }
 
-
 /// **Stage 1**: Builds and saves a file map for all input files.
 ///
 /// This function scans the input directory and creates a mapping from file paths
@@ -42,10 +41,10 @@ fn get_file_map_loc(storage_dir: &PathBuf) -> PathBuf {
 /// # Example
 /// ```no_run
 /// use std::path::PathBuf;
-/// 
+///
 /// let input_dir = PathBuf::from("/data/documents");
 /// let storage_dir = PathBuf::from("/scratch/minhash_storage");
-/// 
+///
 /// mh_build_file_map(&input_dir, &storage_dir)?;
 /// ```
 ///
@@ -57,7 +56,6 @@ pub fn mh_build_file_map(input_dir: &PathBuf, storage_dir: &PathBuf) -> Result<(
     let file_map_loc = get_file_map_loc(storage_dir);
     file_map.save(&file_map_loc)
 }
-
 
 /// **Stage 2**: Computes MinHash signatures for a chunk of documents.
 ///

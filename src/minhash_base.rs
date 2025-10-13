@@ -19,13 +19,12 @@
 //! - **Union-Find**: Must run globally (no multi-node parallelism)
 //! - **Cleaning**: Parallel across file path chunks
 
-use std::hash::BuildHasher;
-use ahash::RandomState;
 use crate::minhash_config::Config;
 use crate::storage::GenWriter;
 use crate::storage::{compute_sig_size, to_byte_size, IntValueEnum, SignatureWriter};
 use crate::uf_rush2::{parent as uf_parent, UFRush};
 use crate::utils::json_set;
+use ahash::RandomState;
 use anyhow::{Error, Result};
 use dashmap::DashMap;
 use glob::glob;
@@ -50,6 +49,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::fs::create_dir_all;
 use std::fs::OpenOptions;
+use std::hash::BuildHasher;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::BufRead;
 use std::io::Write;
@@ -60,7 +60,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tiktoken_rs::{cl100k_base, p50k_base, CoreBPE};
 use unicode_segmentation::UnicodeSegmentation;
-
 
 /*======================================================================
 =                            FILE MAP STUFF                            =
@@ -172,8 +171,6 @@ impl FileMap {
     }
 }
 
-
-
 /*======================================================================
 =                            HASHING STUFF                             =
 ======================================================================*/
@@ -189,7 +186,6 @@ pub struct OmniTokenizer {
     tokenizer_name: String,
     inner: CoreBPE,
 }
-
 
 impl OmniTokenizer {
     /// Creates a new tokenizer with the specified strategy.    
@@ -227,7 +223,6 @@ impl OmniTokenizer {
         }
     }
 }
-
 
 /// Computes MinHash signatures for all documents in the assigned path chunk.
 ///
@@ -527,7 +522,6 @@ fn _init_permutations(seeds: &Vec<u64>) -> Array1<u128> {
     a
 }
 
-
 /// Updates minimum hash values with a new n-gram.
 ///
 /// Uses two independent hash functions to create a 128-bit hash,
@@ -542,7 +536,7 @@ fn _update_hash_vals(
     let mut hasher_a = builder_a.build_hasher();
     ngram.hash(&mut hasher_a);
     let hash_val_a = hasher_a.finish();
-    
+
     let builder_b = RandomState::with_seeds(131415, 161718, 192021, 222324);
     let mut hasher_b = builder_b.build_hasher();
     ngram.hash(&mut hasher_b);
@@ -619,7 +613,6 @@ storage_dir/signatures/band_XXX/sigchunk_YYY/pathchunk_ZZZ.sig.bin
 You should first gather all files with a given band_XXX onto a single machine and then run this function
 
 */
-
 
 /// Gathers edges by grouping documents with matching signatures.
 ///
@@ -1153,7 +1146,7 @@ pub fn clean_files(
         "Parsed metadata file in {:?} seconds",
         start_clean_read.elapsed().as_secs()
     );
-    
+
     println!("Scrubbing files...");
     let start_clean = Instant::now();
     let documents_removed = AtomicUsize::new(0);
@@ -1242,7 +1235,7 @@ fn clean_path(
             let (cc_id, cc_size, cc_idx) = *anno_lookup.get(&line_num).unwrap();
             if cc_idx > 0 {
                 lines_removed += 1;
-            }            
+            }
             // Remove if not the first idx
             if cc_idx > 0 && do_remove {
                 continue;

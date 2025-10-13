@@ -70,7 +70,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64};
 
-
 /*======================================================================
 =                            GROUP METHODS                             =
 ======================================================================*/
@@ -203,7 +202,6 @@ pub fn exact_dedup_disk_group(
     );
     Ok(())
 }
-
 
 /// Processes a single file, assigning each document to a bin.
 ///
