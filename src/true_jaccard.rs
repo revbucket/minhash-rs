@@ -160,7 +160,6 @@ fn true_jacc_group(
 
     // Step 0: Load all docs in group into memory (flatmap load them)
     // Parallel across documents
-    let start_read = Instant::now();
 
     let all_docs: Vec<JSONValue> = pvec
         .par_iter()
@@ -177,12 +176,10 @@ fn true_jacc_group(
         })
         .collect();
     let n = all_docs.len();
-    println!("Read docs in {:?} msecs", start_read.elapsed().as_millis());
     let output_docs = Arc::new(Mutex::new(Vec::new()));
 
     // Step 1: Group by previously existing cc_id (count all 'missing' cc_id's together)
     // Parallel across documents
-    let start_group = Instant::now();
     let groups: DashMap<String, Vec<JSONValue>> = DashMap::new();
     if let Some(minhash_cc_id) = minhash_cc_id {
         all_docs.into_par_iter().for_each(|v| {
@@ -203,11 +200,9 @@ fn true_jacc_group(
             .extend(all_docs)
     };
     let mut output_docs = output_docs.lock().unwrap();
-    println!("GRoupd in {:?} msecs", start_group.elapsed().as_millis());
 
     // Step 2: Split off all "hot nodes" and write them
     // (Parallel across groups)
-    let start2 = Instant::now();
     let mut group_freq: HashMap<usize, usize> = HashMap::new();
     groups.iter().for_each(|entry| {
         let len = entry.value().len();
@@ -225,14 +220,9 @@ fn true_jacc_group(
     let hotnode_count = hotnodes.iter().map(|v| v.len()).sum();
     let hotnode_docs: Vec<JSONValue> = hotnodes.into_par_iter().flat_map_iter(|v| v).collect();
     write_docs(hotnode_docs, hotnode_counter, hotnode_dir, "hotnode").unwrap();
-    println!(
-        "Processed hotnodes in {:?} msecs",
-        start2.elapsed().as_millis()
-    );
 
     // Step 3: Make token-ngram sets, gather indices to check, and check jaccard similarities
     // (parallel across docs, then pairs of docs)
-    let start_tok = Instant::now();
     let toksets = toksetify(&proc_groups, tokenizer, ngram_size).unwrap();
     let pair_indices = generate_pair_indices::<HashSet<u64>>(&toksets);
     let pbar = build_pbar(pair_indices.len(), "Pair checks");
@@ -260,14 +250,9 @@ fn true_jacc_group(
             }
         })
         .collect();
-    println!(
-        "Finished tokset in {:?} msecs",
-        start_tok.elapsed().as_millis()
-    );
     // Step 4: Take passing pairs/edges and enter into a UnionFind structure to get CC's
     // (Parallel everywhere)
 
-    let start_uf = Instant::now();
     let uf = UFRush::new();
 
     passing_pairs.into_par_iter().for_each(|(g, i, j)| {
@@ -298,22 +283,13 @@ fn true_jacc_group(
         let new_cc_id = new_cc_counter.fetch_add(1, Ordering::Relaxed);
         cc_id_lookup.insert(*entry.key(), new_cc_id);
     });
-    println!(
-        "Finished uf stuff in {:?} msecs",
-        start_uf.elapsed().as_millis()
-    );
 
     // Step 5: Annotate the docs and write to new directory
     let (annotated_docs, remove_count) =
         par_annotate(proc_groups, n, cc_sizes, cc_id_lookup, &uf, &annotate_key).unwrap();
     output_docs.extend(annotated_docs);
-    let start_anno = Instant::now();
 
     write_docs(output_docs.to_vec(), output_counter, output_dir, "chunk").unwrap();
-    println!(
-        "Finished anno in {:?} msecs",
-        start_anno.elapsed().as_millis()
-    );
     Ok((n, hotnode_count, remove_count))
 }
 
@@ -455,14 +431,10 @@ fn par_annotate(
     });
 
     let remove_count = AtomicUsize::new(0);
-    let set_count = AtomicUsize::new(0);
-    let set_loop = AtomicUsize::new(0);
-    let start_set = Instant::now();
     let new_docs: Vec<JSONValue> = flat_with_indices 
         .into_par_iter()
         .enumerate()
         .map(|(doc_idx, (_, mut obj))| {
-        	let start_set_loop = Instant::now();
             if let Some(parent) = parent_lookup[doc_idx] {
                 let cc_id = *cc_id_lookup.get(&parent).unwrap(); 
                 let cc_size = *cc_size.get(&parent).unwrap();
@@ -470,16 +442,12 @@ fn par_annotate(
                 if cc_idx > 0 {
                     remove_count.fetch_add(1, Ordering::Relaxed);
                 }
-                let start_set = Instant::now();
                 json_set(&mut obj, annotate_key,
                     json!({"cc_id": cc_id, "cc_size": cc_size, "cc_idx": cc_idx}))
                     .unwrap();
-                set_count.fetch_add(start_set.elapsed().as_millis() as usize, Ordering::Relaxed);
             }
-            set_loop.fetch_add(start_set_loop.elapsed().as_millis() as usize, Ordering::Relaxed);
             obj
         }).collect();
-    println!("SET TIME {:?} | {:?} | {:?}", start_set.elapsed().as_millis(), set_loop.into_inner(), set_count.into_inner());
     Ok((new_docs, remove_count.into_inner()))
 }
 
@@ -517,30 +485,19 @@ fn write_docs(
     	idx_groups.push(cur_group)
     }
 
-    let copy_time = AtomicUsize::new(0);
-    let write_time = AtomicUsize::new(0);
     idx_groups.into_par_iter().for_each(|group| {
 
         let output_file = output_dir.clone().join(format!(
             "{}_file_{:08}.jsonl.zst",
             prefix,
             counter.fetch_add(1, Ordering::SeqCst)));
-        let start_copy = Instant::now();
-	    // Pre-calculate total size
 	    let total_size: usize = group.iter().map(|&i| serialized[i].len()).sum();
-	    let mut contents = Vec::with_capacity(total_size);
-	    
-	    // Use extend_from_slice instead of flat_map
+	    let mut contents = Vec::with_capacity(total_size);	    
 	    for &i in &group {
 	        contents.extend_from_slice(&serialized[i]);
 	    }        
-        copy_time.fetch_add(start_copy.elapsed().as_millis() as usize, Ordering::Relaxed);
-
-        let start_write = Instant::now();
         write_mem_to_pathbuf(&contents, &output_file).unwrap();
-        write_time.fetch_add(start_write.elapsed().as_millis() as usize, Ordering::Relaxed);
     });
-	println!("WRITE BREAKDOWN {:?} | {:?}", copy_time.into_inner(), write_time.into_inner());
 
     
     Ok(())
