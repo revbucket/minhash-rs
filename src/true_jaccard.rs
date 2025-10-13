@@ -533,7 +533,7 @@ fn write_docs(
         write_mem_to_pathbuf(&contents, &output_file).unwrap();
         write_time.fetch_add(start_write.elapsed().as_millis() as usize, Ordering::Relaxed);
     });
-    
+	println!("WRITE BREAKDOWN {:?} | {:?}", copy_time.into_inner(), write_time.into_inner());
 
     
     Ok(())
