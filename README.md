@@ -1,6 +1,9 @@
-# Document Deduplication CLI
+# Duplodocus CLI
 
 High-performance exact and fuzzy (MinHash) document deduplication tool, natively implemented in Rust for processing large-scale JSONL datasets.
+<div align="center">
+    <img src="assets/duplodocus_wide.png" width="80%" title="duplodocus">
+</div>
 
 ## Table of Contents
 - [Overview](#overview)
