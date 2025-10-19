@@ -688,6 +688,10 @@ enum Commands {
         /// Offset for the connected component id -- useful when doing this in a multi-node setting. Defaults to 0
         #[arg(long)]
         id_offset: Option<usize>,
+
+        /// Optional: Path to output file for pairwise similarity scores (JSONL format)
+        #[arg(long)]
+        output_similarities: Option<PathBuf>,
     },
 }
 
@@ -875,6 +879,7 @@ fn main() {
             hotnode_dir,
             parallel_nest,
             id_offset,
+            output_similarities,
         } => true_jaccard(
             input_dir,
             output_dir,
@@ -889,6 +894,7 @@ fn main() {
             hotnode_dir.clone(),
             *parallel_nest,
             id_offset.clone(),
+            output_similarities.clone(),
         ),
 
         _ => Ok(()),

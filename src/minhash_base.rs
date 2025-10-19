@@ -206,8 +206,8 @@ impl OmniTokenizer {
     /// Encodes text into a sequence of token IDs.
     pub fn encode(&self, text: &str) -> Vec<usize> {
         match self.tokenizer_name.as_str() {
-            "p50k" => self.inner.encode_with_special_tokens(text),
-            "cl100k" => self.inner.encode_with_special_tokens(text),
+            "p50k" | "p50k_base" => self.inner.encode_with_special_tokens(text),
+            "cl100k" | "cl100k_base" => self.inner.encode_with_special_tokens(text),
             "uniseg" => text
                 .split_word_bounds()
                 .map(|w| {
