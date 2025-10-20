@@ -181,7 +181,7 @@ impl FileMap {
 /// - `"cl100k"`: OpenAI's cl100k_base tokenizer
 /// - `"p50k"`: OpenAI's p50k_base tokenizer  
 /// - `"uniseg"`: Unicode word boundary segmentation
-/// - Default: Character-level (byte-based)
+/// - `"bytes"`: Character-level (byte-based)
 pub struct OmniTokenizer {
     tokenizer_name: String,
     inner: CoreBPE,
@@ -190,6 +190,19 @@ pub struct OmniTokenizer {
 impl OmniTokenizer {
     /// Creates a new tokenizer with the specified strategy.    
     pub fn new(tokenizer_name: &str) -> Result<Self, Error> {
+        // Validate tokenizer name
+        match tokenizer_name {
+            "p50k" | "cl100k" | "uniseg" | "bytes" => {
+                // Valid tokenizer, proceed
+            }
+            _ => {
+                return Err(Error::msg(format!(
+                    "Unknown tokenizer: '{}'. Supported tokenizers are: p50k, cl100k, uniseg, bytes",
+                    tokenizer_name
+                )));
+            }
+        }
+
         if tokenizer_name == "cl100k" {
             Ok(OmniTokenizer {
                 tokenizer_name: tokenizer_name.to_string(),
@@ -216,9 +229,9 @@ impl OmniTokenizer {
                     hasher.finish() as usize
                 })
                 .collect(),
+            "bytes" => {text.bytes().map(|b| b as usize).collect()}
             _ => {
-                // default to character level
-                text.bytes().map(|b| b as usize).collect()
+                panic!("Unknown tokenizer: '{}'. Supported tokenizers are p50k, cl100k, uniseg, bytes", self.tokenizer_name);
             }
         }
     }
