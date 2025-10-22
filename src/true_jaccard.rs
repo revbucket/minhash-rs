@@ -278,22 +278,37 @@ fn true_jacc_group(
                         .unwrap_or("unknown"));
 
                 // Extract text excerpts (first and last 500 chars)
+                // Helper function to safely truncate at char boundaries
+                fn safe_truncate_start(s: &str, max_bytes: usize) -> &str {
+                    if s.len() <= max_bytes {
+                        return s;
+                    }
+                    // Find the last char boundary at or before max_bytes
+                    let mut idx = max_bytes;
+                    while idx > 0 && !s.is_char_boundary(idx) {
+                        idx -= 1;
+                    }
+                    &s[..idx]
+                }
+                fn safe_truncate_end(s: &str, max_bytes: usize) -> &str {
+                    if s.len() <= max_bytes {
+                        return s;
+                    }
+                    // Find the first char boundary at or after (len - max_bytes)
+                    let mut idx = s.len() - max_bytes;
+                    while idx < s.len() && !s.is_char_boundary(idx) {
+                        idx += 1;
+                    }
+                    &s[idx..]
+                }
+
                 let text_i = doc_i.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let text_j = doc_j.get("text").and_then(|v| v.as_str()).unwrap_or("");
 
-                let text_i_start = &text_i[..text_i.len().min(500)];
-                let text_i_end = if text_i.len() > 500 {
-                    &text_i[text_i.len() - 500..]
-                } else {
-                    text_i
-                };
-
-                let text_j_start = &text_j[..text_j.len().min(500)];
-                let text_j_end = if text_j.len() > 500 {
-                    &text_j[text_j.len() - 500..]
-                } else {
-                    text_j
-                };
+                let text_i_start = safe_truncate_start(text_i, 500);
+                let text_i_end = safe_truncate_end(text_i, 500);
+                let text_j_start = safe_truncate_start(text_j, 500);
+                let text_j_end = safe_truncate_end(text_j, 500);
 
                 // Write similarity record
                 let record = json!({

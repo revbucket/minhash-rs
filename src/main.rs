@@ -93,6 +93,7 @@ use std::option::Option;
 use std::path::PathBuf;
 
 // Internal crate imports
+use crate::component_analysis::analyze_components;
 use crate::exact_dedup_disk::{exact_dedup_disk_group, exact_dedup_disk_prune};
 use crate::exact_dedup_memory::exact_dedup_memory;
 use crate::minhash_disk::{
@@ -101,6 +102,7 @@ use crate::minhash_disk::{
 use crate::minhash_memory::minhash_memory;
 use crate::true_jaccard::true_jaccard;
 
+pub mod component_analysis;
 pub mod exact_dedup_disk;
 pub mod exact_dedup_memory;
 pub mod minhash_base;
@@ -693,6 +695,42 @@ enum Commands {
         #[arg(long)]
         output_similarities: Option<PathBuf>,
     },
+
+    /// Analyze MinHash connected components structure and quality
+    ///
+    /// Computes true Jaccard similarities for all pairs within MinHash components
+    /// and classifies edges as direct (band-matched) vs transitive (Union-Find).
+    /// Outputs detailed component statistics to JSONL file.
+    ///
+    /// EXAMPLE:
+    ///   cargo run --release -- component-analysis \
+    ///     --input-dir /data/documents \
+    ///     --storage-dir /work/minhash \
+    ///     --output-file /results/component_stats.jsonl \
+    ///     --text-key "text" \
+    ///     --config /work/dedupe_config.yaml
+    #[clap(arg_required_else_help = true)]
+    ComponentAnalysis {
+        /// Directory containing original input documents
+        #[arg(required = true, long)]
+        input_dir: PathBuf,
+
+        /// Working directory containing MinHash results (edges, UF, file map)
+        #[arg(required = true, long)]
+        storage_dir: PathBuf,
+
+        /// Path to output JSONL file for component analysis
+        #[arg(required = true, long)]
+        output_file: PathBuf,
+
+        /// JSON key containing document text
+        #[arg(long, default_value_t = String::from("text"))]
+        text_key: String,
+
+        /// Optional: Path to YAML configuration file
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 /*=================================================================
@@ -895,6 +933,20 @@ fn main() {
             *parallel_nest,
             id_offset.clone(),
             output_similarities.clone(),
+        ),
+
+        Commands::ComponentAnalysis {
+            input_dir,
+            storage_dir,
+            output_file,
+            text_key,
+            config,
+        } => analyze_components(
+            input_dir,
+            storage_dir,
+            output_file,
+            text_key,
+            config.clone(),
         ),
 
         _ => Ok(()),
