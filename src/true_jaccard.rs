@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::io::BufRead;
+use std::io::{BufRead, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
+use std::fs::File;
 
 use ahash::RandomState;
 use anyhow::{Error, Result};
@@ -38,6 +39,7 @@ pub fn true_jaccard(
     hotnode_dir: Option<PathBuf>,
     parallel_nest: usize,
     id_offset: Option<usize>,
+    output_similarities: Option<PathBuf>,
 ) -> Result<()> {
     let start_main = Instant::now();
     println!("Starting true jaccard checks");
@@ -96,6 +98,14 @@ pub fn true_jaccard(
     let hotnode_count = AtomicUsize::new(0);
     let remove_count = AtomicUsize::new(0);
 
+    // Initialize similarity writer if output path provided
+    let similarity_writer: Option<Arc<Mutex<BufWriter<File>>>> = if let Some(sim_path) = output_similarities {
+        let file = File::create(sim_path)?;
+        Some(Arc::new(Mutex::new(BufWriter::new(file))))
+    } else {
+        None
+    };
+
     // Loop over each "group" and calculate exact jaccard similarities
     let pbar = build_pbar(paths.len(), "Paths");
     let chunk_size = (paths.len() - 1) / parallel_nest + 1;
@@ -115,6 +125,7 @@ pub fn true_jaccard(
                 annotate_key.to_string(),
                 &output_counter,
                 &new_cc_counter,
+                similarity_writer.clone(),
             )
             .unwrap();
             total_count.fetch_add(group_total, Ordering::SeqCst);
@@ -155,6 +166,7 @@ fn true_jacc_group(
     annotate_key: String,
     output_counter: &AtomicUsize,
     new_cc_counter: &AtomicUsize,
+    similarity_writer: Option<Arc<Mutex<BufWriter<File>>>>,
 ) -> Result<(usize, usize, usize), Error> {
     // Handles a group of files to filter for jaccard similarity between all pairs that share a 'minhash' (or all, if none have)
 
@@ -226,30 +238,135 @@ fn true_jacc_group(
     let toksets = toksetify(&proc_groups, tokenizer, ngram_size).unwrap();
     let pair_indices = generate_pair_indices::<HashSet<u64>>(&toksets);
     let pbar = build_pbar(pair_indices.len(), "Pair checks");
-    let passing_pairs: Vec<&(usize, usize, usize)> = pair_indices
-        .par_iter()
-        .filter(|(g, i, j)| {
-            let hashset_i = &toksets[*g][*i];
-            let hashset_j = &toksets[*g][*j];
-            let (hashset_i, hashset_j) = if hashset_i.len() < hashset_j.len() {
-                (hashset_i, hashset_j)
-            } else {
-                (hashset_j, hashset_i)
-            };
-            let intersection_size: usize = hashset_i
-                .iter()
-                .map(|v| if hashset_j.contains(&v) { 1 } else { 0 })
-                .sum();
-            let union_size = hashset_i.len() - intersection_size + hashset_j.len(); // p.i.e
-            let jacc_score = intersection_size as f64 / union_size as f64;
-            pbar.inc(1);
-            if jacc_score >= jaccard_threshold {
-                true
-            } else {
-                false
-            }
-        })
-        .collect();
+
+    // If writing similarities, we need to compute all scores and write them
+    let passing_pairs: Vec<(usize, usize, usize)> = if let Some(ref writer) = similarity_writer {
+        // Compute all similarities and write them, then filter for passing pairs
+        pair_indices
+            .par_iter()
+            .filter_map(|(g, i, j)| {
+                let hashset_i = &toksets[*g][*i];
+                let hashset_j = &toksets[*g][*j];
+                let (hashset_i, hashset_j) = if hashset_i.len() < hashset_j.len() {
+                    (hashset_i, hashset_j)
+                } else {
+                    (hashset_j, hashset_i)
+                };
+                let intersection_size: usize = hashset_i
+                    .iter()
+                    .map(|v| if hashset_j.contains(&v) { 1 } else { 0 })
+                    .sum();
+                let union_size = hashset_i.len() - intersection_size + hashset_j.len();
+                let jacc_score = intersection_size as f64 / union_size as f64;
+
+                // Get document metadata
+                let doc_i = &proc_groups[*g][*i];
+                let doc_j = &proc_groups[*g][*j];
+
+                // Extract identifiers (use "id" field if present, otherwise use text preview)
+                let id_i = doc_i.get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| doc_i.get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|s| &s[..s.len().min(50)])
+                        .unwrap_or("unknown"));
+                let id_j = doc_j.get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| doc_j.get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|s| &s[..s.len().min(50)])
+                        .unwrap_or("unknown"));
+
+                // Extract text excerpts (first and last 500 chars)
+                // Helper function to safely truncate at char boundaries
+                fn safe_truncate_start(s: &str, max_bytes: usize) -> &str {
+                    if s.len() <= max_bytes {
+                        return s;
+                    }
+                    // Find the last char boundary at or before max_bytes
+                    let mut idx = max_bytes;
+                    while idx > 0 && !s.is_char_boundary(idx) {
+                        idx -= 1;
+                    }
+                    &s[..idx]
+                }
+                fn safe_truncate_end(s: &str, max_bytes: usize) -> &str {
+                    if s.len() <= max_bytes {
+                        return s;
+                    }
+                    // Find the first char boundary at or after (len - max_bytes)
+                    let mut idx = s.len() - max_bytes;
+                    while idx < s.len() && !s.is_char_boundary(idx) {
+                        idx += 1;
+                    }
+                    &s[idx..]
+                }
+
+                let text_i = doc_i.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let text_j = doc_j.get("text").and_then(|v| v.as_str()).unwrap_or("");
+
+                let text_i_start = safe_truncate_start(text_i, 500);
+                let text_i_end = safe_truncate_end(text_i, 500);
+                let text_j_start = safe_truncate_start(text_j, 500);
+                let text_j_end = safe_truncate_end(text_j, 500);
+
+                // Write similarity record
+                let record = json!({
+                    "doc1_id": id_i,
+                    "doc1_text_start": text_i_start,
+                    "doc1_text_end": text_i_end,
+                    "doc2_id": id_j,
+                    "doc2_text_start": text_j_start,
+                    "doc2_text_end": text_j_end,
+                    "jaccard_score": jacc_score,
+                    "doc1_group": g,
+                    "doc2_group": g,
+                    "doc1_idx": i,
+                    "doc2_idx": j
+                });
+
+                if let Ok(json_str) = serde_json::to_string(&record) {
+                    let mut w = writer.lock().unwrap();
+                    let _ = writeln!(w, "{}", json_str);
+                }
+
+                pbar.inc(1);
+
+                // Return pair if it passes threshold
+                if jacc_score >= jaccard_threshold {
+                    Some((*g, *i, *j))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        // Original behavior: just filter by threshold
+        pair_indices
+            .par_iter()
+            .filter_map(|(g, i, j)| {
+                let hashset_i = &toksets[*g][*i];
+                let hashset_j = &toksets[*g][*j];
+                let (hashset_i, hashset_j) = if hashset_i.len() < hashset_j.len() {
+                    (hashset_i, hashset_j)
+                } else {
+                    (hashset_j, hashset_i)
+                };
+                let intersection_size: usize = hashset_i
+                    .iter()
+                    .map(|v| if hashset_j.contains(&v) { 1 } else { 0 })
+                    .sum();
+                let union_size = hashset_i.len() - intersection_size + hashset_j.len();
+                let jacc_score = intersection_size as f64 / union_size as f64;
+                pbar.inc(1);
+                if jacc_score >= jaccard_threshold {
+                    Some((*g, *i, *j))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
     // Step 4: Take passing pairs/edges and enter into a UnionFind structure to get CC's
     // (Parallel everywhere)
 
@@ -290,6 +407,13 @@ fn true_jacc_group(
     output_docs.extend(annotated_docs);
 
     write_docs(output_docs.to_vec(), output_counter, output_dir, "chunk").unwrap();
+
+    // Flush similarity writer if present
+    if let Some(writer) = similarity_writer {
+        let mut w = writer.lock().unwrap();
+        w.flush().unwrap();
+    }
+
     Ok((n, hotnode_count, remove_count))
 }
 
@@ -300,6 +424,7 @@ fn text_2_tokset(
 ) -> Result<HashSet<u64>, Error> {
     let mut tokset: HashSet<u64> = HashSet::new();
     let tokens = preprocess_text(&text.as_str(), tokenizer);
+
     let mut ngram: VecDeque<usize> = VecDeque::with_capacity(ngram_size);
     let mut ngram_count = 0;
 
