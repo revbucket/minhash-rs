@@ -1,3 +1,4 @@
+use std::fs;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::io::BufRead;
@@ -117,6 +118,8 @@ pub fn true_jaccard(
                 annotate_key.to_string(),
                 &output_counter,
                 &new_cc_counter,
+                &delete_while_cleaning,
+                input_dir,
             )
             .unwrap();
             total_count.fetch_add(group_total, Ordering::SeqCst);
@@ -157,6 +160,8 @@ fn true_jacc_group(
     annotate_key: String,
     output_counter: &AtomicUsize,
     new_cc_counter: &AtomicUsize,
+    delete_while_cleaning: &bool,
+    input_dir: &PathBuf,
 ) -> Result<(usize, usize, usize), Error> {
     // Handles a group of files to filter for jaccard similarity between all pairs that share a 'minhash' (or all, if none have)
 
@@ -177,6 +182,11 @@ fn true_jacc_group(
                 .collect::<Vec<JSONValue>>()
         })
         .collect();
+    if *delete_while_cleaning {
+        pvec.par_iter().for_each(|p| {
+            fs::remove_file(&input_dir.clone().join(p)).unwrap();
+        });
+    }
     let n = all_docs.len();
     let output_docs = Arc::new(Mutex::new(Vec::new()));
 
