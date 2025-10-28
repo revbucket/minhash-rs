@@ -38,6 +38,7 @@ pub fn true_jaccard(
     hotnode_dir: Option<PathBuf>,
     parallel_nest: usize,
     id_offset: Option<usize>,
+    delete_while_cleaning: Option<bool>,
 ) -> Result<()> {
     let start_main = Instant::now();
     println!("Starting true jaccard checks");
@@ -63,6 +64,7 @@ pub fn true_jaccard(
             remove_duplicates: Some(false),
         },
     };
+    let delete_while_cleaning = delete_while_cleaning.unwrap_or(overrides.output_params.delete_while_cleaning.unwrap());
 
     let hotnode_size = hotnode_size.unwrap_or(usize::MAX);
     let hotnode_dir = hotnode_dir.unwrap_or_else(|| output_dir.clone());

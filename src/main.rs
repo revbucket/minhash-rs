@@ -688,6 +688,10 @@ enum Commands {
         /// Offset for the connected component id -- useful when doing this in a multi-node setting. Defaults to 0
         #[arg(long)]
         id_offset: Option<usize>,
+
+        /// Delete input files after processing
+        #[arg(long)]
+        delete_while_cleaning: Option<bool>,
     },
 }
 
@@ -875,6 +879,7 @@ fn main() {
             hotnode_dir,
             parallel_nest,
             id_offset,
+            delete_while_cleaning,
         } => true_jaccard(
             input_dir,
             output_dir,
@@ -889,6 +894,7 @@ fn main() {
             hotnode_dir.clone(),
             *parallel_nest,
             id_offset.clone(),
+            delete_while_cleaning.clone(),
         ),
 
         _ => Ok(()),
