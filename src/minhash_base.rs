@@ -29,7 +29,7 @@ use anyhow::{Error, Result};
 use dashmap::DashMap;
 use glob::glob;
 use mj_io::{
-    build_pbar, expand_dirs, get_output_filename, read_pathbuf_to_mem, write_mem_to_pathbuf, read_pathbuf,
+    build_pbar, expand_dirs, get_output_filename, read_pathbuf_to_mem, write_mem_to_pathbuf, read_pathbuf, create_writer
 };
 use ndarray::Array1;
 use rand::Rng;
@@ -1230,7 +1230,6 @@ fn clean_path(
         .collect();
 
     //let mut concat_kill: HashMap<Vec<String>, (usize, usize, usize)> = HashMap::new();
-    let mut output_bytes = Vec::new();
     let mut lines_seen = 0;
     let mut lines_removed = 0;
 
@@ -1239,7 +1238,7 @@ fn clean_path(
                "cc_size": val.1,
                "cc_idx": val.2})
     }
-
+    let mut writer = create_writer(&output_filename).unwrap();
     for (line_num, line) in contents.lines().enumerate() {
         lines_seen += 1;
         let line = line?;
@@ -1259,22 +1258,18 @@ fn clean_path(
                 let mut line_json: JSONValue = serde_json::from_str(&line).unwrap();
                 let anno_value = get_anno_value((cc_id, cc_size, cc_idx));
                 json_set(&mut line_json, &annotate_key.clone(), anno_value).unwrap();
-                output_bytes.extend(serde_json::to_vec(&line_json).unwrap());
-                output_bytes.push(b'\n');
+                writer.write_line(&serde_json::to_vec(&line_json).unwrap()).unwrap();
+
             } else {
                 // Otherwise just write the line
-                output_bytes.extend(line.as_bytes());
-                output_bytes.push(b'\n');
+                writer.write_line(&line.as_bytes().to_vec()).unwrap();
             }
         } else {
             // Not found in minhash, is "unique" and gets to survive
-            output_bytes.extend(line.as_bytes());
-            output_bytes.push(b'\n');
+            writer.write_line(&line.as_bytes().to_vec()).unwrap();
         }
     }
-    if output_bytes.len() > 0 {
-        write_mem_to_pathbuf(&output_bytes, &output_filename).unwrap();
-    }
+
 
     Ok((lines_seen, lines_removed))
 }

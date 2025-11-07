@@ -31,14 +31,13 @@ use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64};
 
 use crate::utils::{json_get, json_set};
 use mj_io::{
-    build_pbar, expand_dirs, get_output_filename, read_pathbuf_to_mem, write_mem_to_pathbuf,
+    build_pbar, expand_dirs, get_output_filename, read_pathbuf, create_writer,
 };
 use std::time::Instant;
 /*
@@ -256,7 +255,7 @@ fn build_out_counter<K: DocHash>(
     hash_key: &Option<String>,
     counter: &DashMap<K, usize>,
 ) -> Result<(), Error> {
-    let data = read_pathbuf_to_mem(p).unwrap();
+    let data = read_pathbuf(p, true).unwrap();
     for line in data.lines() {
         let line = line.unwrap();
         let line_json: Value = serde_json::from_str(&line).unwrap();
@@ -295,9 +294,8 @@ fn exact_dedup_file<K: DocHash>(
         0
     };
 
-    let mut output_contents: Vec<u8> = Vec::new();
-
-    let data = read_pathbuf_to_mem(&p).unwrap();
+    let mut writer = create_writer(&output_filename).unwrap();
+    let data = read_pathbuf(&p, true).unwrap();
     for line in data.lines() {
         let line = line.unwrap();
         seen += 1;
@@ -308,20 +306,17 @@ fn exact_dedup_file<K: DocHash>(
             let anno_data = json!({"hash": hash_val.to_json(),
 			 					   "num_dups": *count});
             json_set(&mut line_json, &annotate_key, anno_data).unwrap();
-            output_contents.extend(serde_json::to_vec(&line_json).unwrap());
-            output_contents.push(b'\n');
+            writer.write_line(&serde_json::to_vec(&line_json).unwrap()).unwrap();
         } else {
             let count = *counter.entry(hash_val).and_modify(|c| *c += 1).or_insert(1);
             if count == 1 {
                 kept += 1;
-                output_contents.extend(line.into_bytes());
-                output_contents.push(b'\n');
+                writer.write_line(&serde_json::to_vec(&line_json).unwrap()).unwrap();
             }
         }
     }
-    if output_contents.len() > 0 {
-        write_mem_to_pathbuf(&output_contents, &output_filename).unwrap()
-    }
+    writer.finish().unwrap();
+
 
     Ok((seen, kept))
 }

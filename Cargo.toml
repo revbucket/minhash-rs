@@ -28,6 +28,6 @@ byteorder = "1.5.0"
 serde_yaml = "0.9.34"
 unicode-segmentation = "1.12.0"
 ahash = "0.8.11"
-mj_io = "0.1.6"
+mj_io = "0.1.7"
 num-traits = "0.2.19"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

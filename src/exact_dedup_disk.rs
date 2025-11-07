@@ -55,7 +55,7 @@ use crate::utils::{json_get, json_set};
 use anyhow::{anyhow, Error, Result};
 use dashmap::DashMap;
 use mj_io::{
-    build_pbar, expand_dirs, get_output_filename, write_mem_to_pathbuf, read_pathbuf
+    build_pbar, expand_dirs, get_output_filename, read_pathbuf, create_writer
 };
 use rand::Rng;
 use rayon::prelude::*;
@@ -435,8 +435,9 @@ fn prune_group(
         })
     }
     vlist.par_iter().for_each(|p| {
-        let contents = read_pathbuf(p, true).unwrap();
-        let mut output_contents: Vec<u8> = Vec::new();
+        let contents = read_pathbuf(p, true).unwrap();        
+        let output_filename = get_output_filename(&p, storage_dir, output_dir).unwrap();
+        let mut writer = create_writer(&output_filename).unwrap();
         for line in contents.lines() {
             let line = line.unwrap();
             let mut line_json = serde_json::from_str(&line).unwrap();
@@ -446,23 +447,18 @@ fn prune_group(
                 let anno_data = json!({"hash": hash_val,
 			 					       "num_dups": *count});
                 json_set(&mut line_json, &anno, anno_data).unwrap();
-                output_contents.extend(serde_json::to_vec(&line_json).unwrap());
-                output_contents.push(b'\n');
+                writer.write_line(&serde_json::to_vec(&line_json).unwrap()).unwrap();
             } else {
                 let count = *counter
                     .entry(hash_val.clone())
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
                 if count == 1 {
-                    output_contents.extend(line.into_bytes());
-                    output_contents.push(b'\n');
+                    writer.write_line(&serde_json::to_vec(&line_json).unwrap()).unwrap();
                 }
             }
         }
-        if output_contents.len() > 0 {
-            let output_filename = get_output_filename(&p, storage_dir, output_dir).unwrap();
-            write_mem_to_pathbuf(&output_contents, &output_filename).unwrap();
-        }
+        writer.finish().unwrap();
     });
     let kept_docs = counter.len();
     let docs_seen = counter.into_par_iter().map(|(_k, v)| v).sum::<usize>();
