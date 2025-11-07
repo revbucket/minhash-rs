@@ -391,11 +391,18 @@ fn process_path(
     sig_size: usize,
     content_key: &str,
 ) -> Result<usize, Error> {
-    // Setup things: load data, build tokenizer, etc
-    let data = read_pathbuf_to_mem(path).unwrap();
-    // let mut buffer = Vec::new();
-    // data.read_to_end(&mut buffer).unwrap();
-    // println!("READ DATA {:?}", buffer);
+    // Setup things: open file for streaming, build tokenizer, etc
+    use flate2::read::MultiGzDecoder;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(path)?;
+    let reader: Box<dyn BufRead> = match path.extension().and_then(|e| e.to_str()) {
+        Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(file))),
+        Some("zst") | Some("zstd") => Box::new(BufReader::new(zstd::Decoder::new(file)?)),
+        _ => Box::new(BufReader::new(file)),
+    };
+
     let tokenizer = OmniTokenizer::new(tokenizer_str).unwrap();
     let num_bands = band_seeds.len();
     let perm_seeds: Vec<u64> = band_seeds
@@ -405,7 +412,7 @@ fn process_path(
     let path_id = IntValueEnum::new(path_id, path_size);
 
     let mut docs_hashed = 0;
-    for (line_num, line) in data.lines().enumerate() {
+    for (line_num, line) in reader.lines().enumerate() {
         let line = line.unwrap();
         let json_obj: Value = serde_json::from_str(&line).expect(&format!(
             "Failed to parse {:?} {:?}",
