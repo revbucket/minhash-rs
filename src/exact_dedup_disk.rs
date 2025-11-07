@@ -55,7 +55,7 @@ use crate::utils::{json_get, json_set};
 use anyhow::{anyhow, Error, Result};
 use dashmap::DashMap;
 use mj_io::{
-    build_pbar, expand_dirs, get_output_filename, read_pathbuf_to_mem, write_mem_to_pathbuf,
+    build_pbar, expand_dirs, get_output_filename, write_mem_to_pathbuf, read_pathbuf
 };
 use rand::Rng;
 use rayon::prelude::*;
@@ -64,7 +64,6 @@ use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -218,7 +217,7 @@ pub fn group_docs(
     gen_writer: &GenWriter,
     num_bins: usize,
 ) -> Result<usize, Error> {
-    let contents = read_pathbuf_to_mem(p).unwrap();
+    let contents = read_pathbuf(p, true).unwrap();
     let mut num_docs = 0;
     for line in contents.lines() {
         let mut line = line.unwrap().into_bytes();
@@ -423,7 +422,7 @@ fn prune_group(
     let counter: DashMap<Value, usize> = DashMap::new(); // Maps hash key -> usize
     if let Some(_anno) = annotate_key {
         vlist.par_iter().for_each(|p| {
-            let contents = read_pathbuf_to_mem(p).unwrap();
+            let contents = read_pathbuf(p, true).unwrap();
             for line in contents.lines() {
                 let line = line.unwrap();
                 let line_json = serde_json::from_str(&line).unwrap();
@@ -436,7 +435,7 @@ fn prune_group(
         })
     }
     vlist.par_iter().for_each(|p| {
-        let contents = read_pathbuf_to_mem(p).unwrap();
+        let contents = read_pathbuf(p, true).unwrap();
         let mut output_contents: Vec<u8> = Vec::new();
         for line in contents.lines() {
             let line = line.unwrap();

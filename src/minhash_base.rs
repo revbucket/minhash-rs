@@ -29,7 +29,7 @@ use anyhow::{Error, Result};
 use dashmap::DashMap;
 use glob::glob;
 use mj_io::{
-    build_pbar, expand_dirs, get_output_filename, read_pathbuf_to_mem, write_mem_to_pathbuf,
+    build_pbar, expand_dirs, get_output_filename, read_pathbuf_to_mem, write_mem_to_pathbuf, read_pathbuf,
 };
 use ndarray::Array1;
 use rand::Rng;
@@ -392,7 +392,7 @@ fn process_path(
     content_key: &str,
 ) -> Result<usize, Error> {
     // Setup things: load data, build tokenizer, etc
-    let data = read_pathbuf_to_mem(path).unwrap();
+    let data = read_pathbuf(path, true).unwrap();
     // let mut buffer = Vec::new();
     // data.read_to_end(&mut buffer).unwrap();
     // println!("READ DATA {:?}", buffer);
