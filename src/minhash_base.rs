@@ -57,6 +57,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::panic::catch_unwind;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::time::Instant;
 use tiktoken_rs::{cl100k_base, p50k_base, CoreBPE};
 use unicode_segmentation::UnicodeSegmentation;
@@ -478,7 +479,9 @@ fn clean_text(text: &str) -> String {
     text.retain(|c| !punctuation.contains(&c));
 
     // Replace multiple whitespace characters with a single space
-    let re = Regex::new(r"\s+").unwrap();
+    // Compile regex once and cache it globally
+    static WHITESPACE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = WHITESPACE_RE.get_or_init(|| Regex::new(r"\s+").unwrap());
     text = re.replace_all(&text, " ").to_string();
 
     // Trim leading and trailing whitespace
