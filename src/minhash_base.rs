@@ -179,7 +179,7 @@ impl FileMap {
 ///
 /// Supported tokenizers:
 /// - `"cl100k"`: OpenAI's cl100k_base tokenizer
-/// - `"p50k"`: OpenAI's p50k_base tokenizer  
+/// - `"p50k"`: OpenAI's p50k_base tokenizer
 /// - `"uniseg"`: Unicode word boundary segmentation
 /// - `"bytes"`: Character-level (byte-based)
 pub struct OmniTokenizer {
@@ -188,7 +188,7 @@ pub struct OmniTokenizer {
 }
 
 impl OmniTokenizer {
-    /// Creates a new tokenizer with the specified strategy.    
+    /// Creates a new tokenizer with the specified strategy.
     pub fn new(tokenizer_name: &str) -> Result<Self, Error> {
         // Validate tokenizer name
         match tokenizer_name {
@@ -402,6 +402,10 @@ fn process_path(
         .iter()
         .flat_map(|seed| _expand_rng(*seed, band_size))
         .collect();
+
+    // Pre-compute permutation coefficients once per file (not per document!)
+    let permutation_coeffs = _init_permutations(&perm_seeds);
+
     let path_id = IntValueEnum::new(path_id, path_size);
 
     let mut docs_hashed = 0;
@@ -429,7 +433,8 @@ fn process_path(
             );
             continue;
         };
-        let hash_vals = get_hash_vals_from_tokens(tokens, &perm_seeds, ngram_size);
+        let hash_vals = get_hash_vals_from_tokens_with_coeffs(tokens, &permutation_coeffs, ngram_size);
+
         docs_hashed += 1;
 
         let bands = hash_vals.into_shape((num_bands, band_size)).unwrap();
@@ -482,20 +487,22 @@ fn clean_text(text: &str) -> String {
 
 /// Computes MinHash values from a token sequence using n-gram shingling.
 ///
+/// This is the optimized implementation that accepts pre-computed permutation
+/// coefficients, eliminating redundant RNG calls when processing multiple documents.
+///
 /// # Arguments
 /// * `tokens` - Sequence of token IDs
-/// * `perm_seeds` - Random seeds for hash permutations
+/// * `permutation_coeffs` - Pre-computed permutation coefficients (from `_init_permutations`)
 /// * `ngram_size` - Size of n-grams (shingles)
 ///
 /// # Returns
 /// Array of minimum hash values across all permutations
-pub fn get_hash_vals_from_tokens(
+fn get_hash_vals_from_tokens_with_coeffs(
     tokens: Vec<usize>,
-    perm_seeds: &Vec<u64>,
+    permutation_coeffs: &Array1<u128>,
     ngram_size: usize,
 ) -> Array1<u64> {
-    let a = _init_permutations(perm_seeds);
-    let n = perm_seeds.len();
+    let n = permutation_coeffs.len();
     let mut hash_vals = Array1::ones(n) * u64::MAX;
     let mut ngram: VecDeque<usize> = VecDeque::with_capacity(ngram_size);
     let mut ngram_count = 0;
@@ -503,12 +510,12 @@ pub fn get_hash_vals_from_tokens(
         ngram.push_back(token);
         if ngram.len() >= ngram_size {
             ngram_count += 1;
-            hash_vals = _update_hash_vals(hash_vals, &a, &ngram);
+            hash_vals = _update_hash_vals(hash_vals, permutation_coeffs, &ngram);
             ngram.pop_front();
         }
     }
     hash_vals = if ngram_count == 0 {
-        _update_hash_vals(hash_vals, &a, &ngram) // short document, still wanna hash it
+        _update_hash_vals(hash_vals, permutation_coeffs, &ngram) // short document, still wanna hash it
     } else {
         hash_vals
     };
