@@ -51,7 +51,6 @@ use std::fs::create_dir_all;
 use std::fs::OpenOptions;
 use std::hash::BuildHasher;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::BufRead;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::panic::catch_unwind;
@@ -1231,7 +1230,7 @@ fn clean_path(
     do_remove: bool,
 ) -> Result<(usize, usize), Error> {
     let output_filename = get_output_filename(input_path, input_dir, output_dir).unwrap();
-    let contents = read_pathbuf_to_mem(input_path).unwrap();
+    let contents = read_pathbuf(input_path, true).unwrap();
 
     // Line_num -> (cc_id, cc_size, cc_idx)
     let anno_lookup: HashMap<usize, (usize, usize, usize)> = line_data
